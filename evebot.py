@@ -4,13 +4,14 @@ EVE Online client"""
 from __future__ import division
 
 import os
+import re
 import time
 import logging
 import datetime as dt
-import requests as rq
-import re
-import PIL
+from xml.etree import ElementTree
 
+import requests as rq
+import PIL
 import psutil
 import numpy as np
 import pandas as pd
@@ -20,7 +21,6 @@ import pyperclip as pc
 import pytesseract as pt
 import Levenshtein as lev
 
-from xml.etree import ElementTree
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -50,7 +50,6 @@ logger.addHandler(fh)
 logger.addHandler(fh2)
 
 
-
 ##############################################
 # Constants and Static data imports
 ##############################################
@@ -59,6 +58,7 @@ pg.PAUSE = 2
 MAX_API_ATTEMPTS = 5
 MAX_DELTA_ISK = 20000000
 INV_TYPES = pd.read_csv('static/invTypes.csv')
+
 
 def retry_timeout(timeout, sleep_time=3):
     """Decorator to attempt a function until a timeout expires"""
@@ -77,10 +77,11 @@ def retry_timeout(timeout, sleep_time=3):
                     attempt += 1
                     time.sleep(sleep_time)
 
-            logger.error('Failed %s after %d attempts in %d seconds', str(func), max_attempts, timeout)
+            logger.error('Failed %s after %d attempts in %d seconds', str(func), attempt, timeout)
 
         return func_wrapper
     return retry
+
 
 class CachedCharacterOrders():
     """Class to store the result of a cached API call"""
@@ -125,11 +126,9 @@ class CachedCharacterOrders():
 
         self.logger.debug('API character orders cached until %s UTC', self.api_cached_until)
 
-
     def update(self, old_row, new_price):
         """Update the locally stored information to reflect
         changes that haven't yet appeared in the API due to caching"""
-
 
         if dt.datetime.utcnow() > self.api_cached_until:
             self.pull()
@@ -139,7 +138,6 @@ class CachedCharacterOrders():
         print(order_id)
 
         self.data.loc[self.data.orderID == order_id].price = new_price
-
 
     def get(self):
         """Return the character order dataframe"""
@@ -154,13 +152,16 @@ class APICallException(Exception):
     """Exception for when an API call doesn't return the appropriate data"""
     pass
 
+
 class TemplateNotFoundException(Exception):
     """Exception for when the specified template can't be found on the screen"""
     pass
 
+
 class NoOCRMatchException(Exception):
     """Exception for when order information extracted via OCR can't be matched to orders"""
     pass
+
 
 class LauncherNotStartedException(Exception):
     """Exception for when the EVE launcher doesn't start"""
@@ -197,7 +198,7 @@ def paste_text(text):
 # GUI interaction functions (moving, locating, etc)
 ##############################################
 
-retry_timeout(60)
+@retry_timeout(60)
 def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_NORMED):
     """Find region on the screen matching template"""
 
@@ -228,7 +229,7 @@ def moveTo(target_pos, jitter=(0, 0), relative=False):
         """Return the distance between two points"""
         return np.linalg.norm(np.array(pos1) - np.array(pos2))
 
-    MOVE_SPEED = 5000 # px / sec
+    MOVE_SPEED = 5000   # px / sec
     time_jitter = np.random.randn(1)[0] / 20
 
     current_pos = np.array(pg.position())
@@ -297,7 +298,7 @@ def ocr_row(row_top_left):
     price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
     price_float = float(price_text) / 100
 
-    logger.debug('Extracted (typename, price) : %50s %>11,.2f', name_text, price_float)
+    logger.debug('Extracted (typename, price) : %50s %11.2f', name_text, price_float)
 
     return (name_text, price_text)
 
@@ -353,7 +354,6 @@ def update_all_orders(interactive=False):
     # TODO make order pos offset tidier
     selling_to_order_offset = np.array([80, 19])
     order_pos = selling_pos + selling_to_order_offset
-
 
     char_orders = cached_char_orders.get()
     n_selling = len(char_orders.loc[(char_orders.bid == 0) & (char_orders.orderState == 0)])
@@ -472,13 +472,13 @@ def choose_price(order_type, char_order, market_orders):
     else:
         best_price = sell_orders.price.min()
     if old_price == best_price:
-        logging.info('HOLD - BEST - %s : %s price of %,.2f is already best price', type_name, order_type, old_price)
+        logging.info('HOLD - BEST - %s : %s price of %.2f is already best price', type_name, order_type, old_price)
         return old_price
 
     # CHECK - ISK delta < threshold
     delta_isk = (best_price - old_price) * char_order.volRemaining
     if abs(delta_isk) > MAX_DELTA_ISK:
-        logging.info('HOLD - DELTA - %s : %s delta of %,.2f is too high', type_name, order_type, delta_isk)
+        logging.info('HOLD - DELTA - %s : %s delta of %.2f is too high', type_name, order_type, delta_isk)
         return old_price
 
     # CHECK - range
@@ -488,8 +488,8 @@ def choose_price(order_type, char_order, market_orders):
     # CHECK - margin is acceptable
     margin = (sell_orders.price.min() - buy_orders.price.max()) / buy_orders.price.max()
     if margin < margin_threshold:
-        logger.info('HOLD - MARGIN - %s : margin of %.3f (margin: %,.2f best: %,.2f current: %,.2f) is too small',
-                    type_name, margin, margin*buy_orders.price.max(), best_price, old_price)
+        logger.info('HOLD - MARGIN - %s : margin of %.3f (margin: %.2f best: %.2f current: %.2f) is too small',
+                    type_name, margin, margin * buy_orders.price.max(), best_price, old_price)
         return old_price
 
     if order_type == 'buy':
@@ -497,7 +497,7 @@ def choose_price(order_type, char_order, market_orders):
     else:
         new_price = sell_orders.price.min() - 0.01
 
-    logger.info('UPDATE - %s %s to %,.2f (Old: %,.2f, Delta %,.2f)',
+    logger.info('UPDATE - %s %s to %.2f (Old: %.2f, Delta %.2f)',
                 order_type.upper(), type_name, new_price, old_price, new_price - old_price)
 
     return new_price
@@ -577,7 +577,7 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
     if char_orders is None:
         char_orders = cached_char_orders.get()
 
-    buysell_dict = {'sell':0, 'buy': 1}
+    buysell_dict = {'sell': 0, 'buy': 1}
 
     # only search in buys or sells to prevent accidentally matching on wrong order type
     buys_or_sells = char_orders.loc[char_orders.bid == buysell_dict[order_type]]
@@ -599,8 +599,8 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
                      name_text, price_text, best_match.typeName, best_match.price, pct_diff)
         raise NoOCRMatchException
 
-    logger.debug('Matched (%s, %,.2f) to (%s, %,.2f)',
-                 name_text, int(price_text)/100, best_match.typeName, best_match.price)
+    logger.debug('Matched (%s, %.2f) to (%s, %.2f)',
+                 name_text, int(price_text) / 100, best_match.typeName, best_match.price)
 
     return char_orders.iloc[best_match_index]
 
@@ -609,11 +609,11 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
 # Startup / shutdown functions
 #################################################
 
-def start_launcher(launcher_path="C:\Program Files (x86)\EVE\Launcher\evelauncher.exe", max_attempts=5):
+@retry_timeout(20)
+def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelauncher.exe"):
     """Start the EVE launcher"""
 
     logger.debug('Starting EVE launcher')
-    attempts = 0
 
     try:
         os.startfile(launcher_path)
@@ -621,31 +621,22 @@ def start_launcher(launcher_path="C:\Program Files (x86)\EVE\Launcher\evelaunche
         logger.error('Could not run %s', launcher_path)
         return False
 
-    while attempts < max_attempts:
+    def get_proc_name(process):
+        """Extract process name from psutil.process instance"""
+        try:
+            return process.name()
+        except:
+            return None
 
-        def get_proc_name(process):
-            try:
-                return process.name()
-            except:
-                return None
+    # check if the launcher is running
+    process_names = list([get_proc_name(proc) for proc in psutil.process_iter()])
 
-        # check if the launcher is running
-        process_names = list([get_proc_name(proc) for proc in psutil.process_iter()])
-
-        # if the launcher process is found return True
-        if 'evelauncher.exe' in process_names:
-            logger.debug('Successfully started launcher')
-            return
-
-        # wait 5 seconds then check again
-        else:
-            attempts += 1
-            logger.debug('Could not find evelauncher.exe process on attempt %d', attempt)
-            time.sleep(5)
-
-    # should only reach here if launcher failed to start
-    logger.error('Could not start evelauncher.exe after %d attempts', attempt)
-    raise LauncherNotStartedException
+    # if the launcher process is found return True
+    if 'evelauncher.exe' in process_names:
+        logger.debug('Successfully started launcher')
+        return
+    else:
+        raise LauncherNotStartedException
 
 
 def start_eve():
@@ -730,8 +721,6 @@ def cold_stop():
     quit_launcher()
 
 
-
-
 if __name__ == '__main__':
 
     # add order range check
@@ -757,5 +746,3 @@ if __name__ == '__main__':
         # sleep a random amount of time so we're not updating immediately after the cache
         time.sleep(np.random.randint(5, 600))
         updates += 1
-
-
