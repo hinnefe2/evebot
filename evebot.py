@@ -51,7 +51,7 @@ logger.addHandler(fh2)
 
 
 ##############################################
-# Constants and Static data imports
+# Constants utilities, and static data imports
 ##############################################
 
 pg.PAUSE = 2
@@ -456,6 +456,25 @@ def choose_price(order_type, char_order, market_orders):
     """Choose an appropriate price for the updated order, based on
     competing order price and volume, and historical volume."""
 
+    # TODO refactor idea:
+    # class UpdateCheck:
+    #
+    #   def __init__(self, order_type, char_order, competing_orders, evaluation_func):
+    #
+    #   def check(self):
+    #       return evaluation_function(self)
+    #
+    # def best_price_check(self):
+    #
+    #   passed = (ours is best price)
+    #   return passed (boolean)
+    #
+    #
+    # class TradeLogicManager:
+    #
+    #
+    #
+
     old_price = char_order.price
     type_name = char_order.typeName
 
@@ -617,7 +636,7 @@ def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelaunch
 
     try:
         os.startfile(launcher_path)
-    except:
+    except ValueError:
         logger.error('Could not run %s', launcher_path)
         return False
 
@@ -625,7 +644,7 @@ def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelaunch
         """Extract process name from psutil.process instance"""
         try:
             return process.name()
-        except:
+        except ValueError:
             return None
 
     # check if the launcher is running
