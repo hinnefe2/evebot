@@ -60,6 +60,10 @@ MAX_DELTA_ISK = 20000000
 INV_TYPES = pd.read_csv('static/invTypes.csv')
 
 
+def typeID_to_name(type_id):
+    """Look up item type name by typeID"""
+    return INV_TYPES.loc[INV_TYPES.typeID == type_id].typeName.values[0]
+
 def retry_timeout(timeout, sleep_time=3):
     """Decorator to attempt a function until a timeout expires"""
     def retry(func):
@@ -73,7 +77,8 @@ def retry_timeout(timeout, sleep_time=3):
 
                 try:
                     return func(*args, **kwargs)
-                except Exception:
+                except ValueError:
+                    logger.exception('exception in retry_timeout decorated function')
                     attempt += 1
                     time.sleep(sleep_time)
 
@@ -137,7 +142,7 @@ class CachedCharacterOrders():
         order_id = old_row.orderID
         print(order_id)
 
-        self.data.loc[self.data.orderID == order_id].price = new_price
+        self.data.loc[self.data.orderID == order_id, 'price'] = new_price
 
     def get(self):
         """Return the character order dataframe"""
@@ -198,7 +203,7 @@ def paste_text(text):
 # GUI interaction functions (moving, locating, etc)
 ##############################################
 
-@retry_timeout(60)
+@retry_timeout(20)
 def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_NORMED):
     """Find region on the screen matching template"""
 
@@ -283,7 +288,7 @@ def ocr_row(row_top_left):
     # take a screenshot of the 'name' column in the given row, then blow it up 5x
     name_snap = pg.screenshot(region=wh_from_pos(name_top_left, name_bottom_right))
     name_snap_x5 = name_snap.resize(np.array(name_snap.size) * 5, PIL.Image.ANTIALIAS)
-    name_text = pt.image_to_string(name_snap_x5)
+    name_text = pt.image_to_string(name_snap_x5, config='letters')
 
     price_top_left = (row_top_left[0] + price_x_offset, row_top_left[1])
     price_bottom_right = (row_top_left[0] + price_x_offset + price_w, row_top_left[1] + row_y_offset)
@@ -291,14 +296,14 @@ def ocr_row(row_top_left):
     # take a screenshot of the 'price' column in the given row, then blow it up 5x
     price_snap = pg.screenshot(region=wh_from_pos(price_top_left, price_bottom_right))
     price_snap_x5 = price_snap.resize(np.array(price_snap.size) * 5, PIL.Image.ANTIALIAS)
-    price_text = pt.image_to_string(price_snap_x5)
+    price_text = pt.image_to_string(price_snap_x5, config='letters')
 
     # strip commas, periods, spaces out of price_text, then extract just numbers
-    price_text = price_text.replace('.', '').replace(', ', '').replace(' ', '')
+    price_text = price_text.replace('.', '').replace(',', '').replace(' ', '')
     price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
     price_float = float(price_text) / 100
 
-    logger.debug('Extracted (typename, price) : %50s %11.2f', name_text, price_float)
+    logger.debug('Extracted (typename, price) : (%s, %.2f)', name_text, price_float)
 
     return (name_text, price_text)
 
@@ -482,8 +487,8 @@ def choose_price(order_type, char_order, market_orders):
     margin_threshold = 0.1
 
     # separate buy and sell orders
-    buy_orders = market_orders.loc[market_orders.buy is True]
-    sell_orders = market_orders.loc[(market_orders.buy is False) & (market_orders.stationID == char_order.stationID)]
+    buy_orders = market_orders.loc[market_orders.buy == True]
+    sell_orders = market_orders.loc[(market_orders.buy == False) & (market_orders.stationID == char_order.stationID)]
 
     # CHECK - ours is already the best price
     if order_type == 'buy':
@@ -491,13 +496,13 @@ def choose_price(order_type, char_order, market_orders):
     else:
         best_price = sell_orders.price.min()
     if old_price == best_price:
-        logging.info('HOLD - BEST - %s : %s price of %.2f is already best price', type_name, order_type, old_price)
+        logger.info('%s - HOLD - BEST : %s price of %.2f is already best price', order_type.upper(), type_name, old_price)
         return old_price
 
     # CHECK - ISK delta < threshold
     delta_isk = (best_price - old_price) * char_order.volRemaining
     if abs(delta_isk) > MAX_DELTA_ISK:
-        logging.info('HOLD - DELTA - %s : %s delta of %.2f is too high', type_name, order_type, delta_isk)
+        logger.info('%s - HOLD - DELTA : %s delta of %.2f is too high', order_type.upper(), type_name, delta_isk)
         return old_price
 
     # CHECK - range
@@ -507,8 +512,8 @@ def choose_price(order_type, char_order, market_orders):
     # CHECK - margin is acceptable
     margin = (sell_orders.price.min() - buy_orders.price.max()) / buy_orders.price.max()
     if margin < margin_threshold:
-        logger.info('HOLD - MARGIN - %s : margin of %.3f (margin: %.2f best: %.2f current: %.2f) is too small',
-                    type_name, margin, margin * buy_orders.price.max(), best_price, old_price)
+        logger.info('%s - HOLD - MARGIN - %s : margin of %.3f (margin: %.2f best: %.2f current: %.2f) is too small',
+                    order_type.upper(), type_name, margin, margin * buy_orders.price.max(), best_price, old_price)
         return old_price
 
     if order_type == 'buy':
@@ -516,7 +521,7 @@ def choose_price(order_type, char_order, market_orders):
     else:
         new_price = sell_orders.price.min() - 0.01
 
-    logger.info('UPDATE - %s %s to %.2f (Old: %.2f, Delta %.2f)',
+    logger.info('%s - UPDATE %s to %.2f (Old: %.2f, Delta %.2f)',
                 order_type.upper(), type_name, new_price, old_price, new_price - old_price)
 
     return new_price
@@ -536,13 +541,13 @@ def get_market_orders(region_id='10000030', type_id='34'):
 
     dfs = []
     for order_type in ['buy', 'sell']:
-        logger.debug('Querying market %s orders from XML API for typeID %d', order_type.upper(), type_id)
+        logger.debug('Querying market %s orders from XML API for %s', order_type.upper(), typeID_to_name(type_id))
 
         resp = rq.get(crest_order_url.format(region_id, order_type, type_id))
         resp_json = resp.json()
         dfs.append(pd.DataFrame(resp_json['items']))
 
-        logger.debug('Got market %s orders from XML API for typeID %d', order_type.upper(), type_id)
+        logger.debug('Got market %s orders from XML API for %s', order_type.upper(), typeID_to_name(type_id))
 
     orders = pd.concat(dfs)
 
@@ -751,7 +756,7 @@ if __name__ == '__main__':
 
     while updates < 6:
         cold_start()
-        logging.info('Updating orders for %d time', updates)
+        logger.info('Updating orders for %d time', updates)
         update_all_orders(interactive=False)
         cold_stop()
 
