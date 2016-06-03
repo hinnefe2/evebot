@@ -64,31 +64,54 @@ def typeID_to_name(type_id):
     """Look up item type name by typeID"""
     return INV_TYPES.loc[INV_TYPES.typeID == type_id].typeName.values[0]
 
+
+def func_wrapper_ntimes(func, *args, **kwargs):
+    """Wrapper for use in decorators to retry a function a set number of times"""
+
+    attempt = 0
+
+    while attempt < max_attempts:
+
+        try:
+            return func(*args, **kwargs)
+        except ValueError:
+            logger.error('ValueError exception in retry_timeout decorated function')
+            attempt += 1
+            time.sleep(sleep_time)
+
+    logger.error('Failed %s after %d attempts', str(func), attempt)
+
+
+def func_wrapper_timeout(func, *args, **kwargs):
+    """Wrapper for use in decorators to retry a function until a timeout period expires"""
+
+    t_start = dt.datetime.now()
+    t_wait = dt.timedelta(seconds=timeout)
+    attempt = 0
+
+    while dt.datetime.now() < t_start + t_wait:
+
+        try:
+            return func(*args, **kwargs)
+        except ValueError:
+            logger.error('ValueError exception in retry_timeout decorated function')
+            attempt += 1
+            time.sleep(sleep_time)
+
+    logger.error('Failed %s after %d attempts in %d seconds', str(func), attempt, timeout)
+
+
 def retry_timeout(timeout, sleep_time=5):
     """Decorator to attempt a function until a timeout expires"""
     def retry(func):
-        def func_wrapper(*args, **kwargs):
+        return func_wrapper_timeout
+    return retry
 
-            t_start = dt.datetime.now()
-            t_wait = dt.timedelta(seconds=timeout)
-            attempt = 0
 
-            while dt.datetime.now() < t_start + t_wait:
-
-                try:
-                    return func(*args, **kwargs)
-                except ValueError:
-                    logger.error('ValueError exception in retry_timeout decorated function')
-                    attempt += 1
-                    time.sleep(sleep_time)
-		except Exception:
-                    logger.error('exception in retry_timeout decorated function')
-                    attempt += 1
-                    time.sleep(sleep_time)
-
-            logger.error('Failed %s after %d attempts in %d seconds', str(func), attempt, timeout)
-
-        return func_wrapper
+def retry_ntimes(max_attempts, sleep_time=5):
+    """Decorator to attempt a function a set number of times"""
+    def retry(func):
+        return func_wrapper_ntimes
     return retry
 
 
@@ -213,14 +236,14 @@ def paste_text(text):
 # GUI interaction functions (moving, locating, etc)
 ##############################################
 
-@retry_timeout(20)
 def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_NORMED):
-    """Find region on the screen matching template"""
+    """Find region on the screen matching a supplied template"""
 
+    # flip the color b/c cv2 pulls tuples as BGR instead of RGB
     template = flip_color(cv2.imread(template_path))
 
     if screen is None:
-        screen = np.array(pg.screenshot())
+        screen = pg.screenshot()
 
     template_arr = np.array(template)
     screen_arr = np.array(screen)
@@ -229,7 +252,7 @@ def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_
 
     matches = np.array(np.where(result_arr >= threshold))
     if matches.size == 0:
-        logger.exception('Could not find template %s', template_path)
+        logger.error('Could not find template %s', template_path)
         raise TemplateNotFoundException
 
     (_, maxMatch, _, maxLoc) = cv2.minMaxLoc(result_arr)
@@ -277,7 +300,7 @@ def click_img(img_path, button='left'):
     offset_y = img.shape[0] / 2
     img_center = [coord + offset for coord, offset in zip(img_pos, [offset_x, offset_y])]
 
-    # add a uniform jitter over the whole image
+    # add a uniform jitter over 80% of the whole image
     jitter_x = np.random.randint(-offset_x, offset_x) * 0.8
     jitter_y = np.random.randint(-offset_y, offset_y) * 0.8
 
@@ -331,6 +354,7 @@ def open_client_window(window_name):
 
     img_dict = {'market': 'images/client-market-header2.png'}
 
+    window_hkey = hotkey_dict[window_name]
     window_img = img_dict[window_name]
 
     # if we can find the window header, close then reopen
@@ -339,11 +363,11 @@ def open_client_window(window_name):
         match_template(window_img)
 
         pg.keyDown('alt')
-        pg.press(hotkey_dict[window_name])
+        pg.press(window_hkey)
         pg.keyUp('alt')
 
         pg.keyDown('alt')
-        pg.press(hotkey_dict[window_name])
+        pg.press(window_hkey)
         pg.keyUp('alt')
 
     # if we can't find the window header open it once
@@ -357,7 +381,6 @@ def open_client_window(window_name):
     time.sleep(2)
 
     logger.debug("Opened client window '%s'", window_name)
-    return match_template(window_img) is not None
 
 
 def update_all_orders(interactive=False):
@@ -664,17 +687,25 @@ def start_eve():
     return True
 
 
-def wait_for_window(window_name, window_img_path, timeout=60):
+def wait_for_window(window_name, window_img_path, timeout=60, retry=False, retry_fn=None):
     """Wait for the window identified by window_img to load
 
-    Returns:
-    - success(bool): Whether the window has loaded
+    Args:
+     window_name(str): the name of the window, for logging purposes
+     window_img_path(str): the path the the template image which identifies the window
+     timeout(int): the number of seconds to wait for the window
+     retry(bool): whether to retry opening the window if it isn't detected after the timout
+     retry_fn: a functino which will attempt to open the window
+
+    Raises:
+     WindowNotFoundException: if the specified window isn't detected after the timeout period
     """
 
-    logger.debug('Waiting for %s to load', window_name)
+    # if we want to retry opening a window we have to supply a function to open the window
+    if retry:
+        assert retry_fn is not None, 'if retrying must supply a retry function'
 
-    # so that cursor isn't over anything important
-    #pg.moveTo(10, 10)
+    logger.debug('Waiting for %s to load', window_name)
 
     t_start = dt.datetime.now()
     t_wait = dt.timedelta(seconds=timeout)
@@ -690,7 +721,12 @@ def wait_for_window(window_name, window_img_path, timeout=60):
 
     # should only get here if we timed out
     logger.error('Could not find %s window', window_name)
-    raise WindowNotFoundException(window_name, window_img_path)
+
+    # if we want to retry opening the window
+    if retry:
+        
+    else:
+        raise WindowNotFoundException(window_name, window_img_path)
 
 
 def quit_launcher():
