@@ -54,7 +54,7 @@ logger.addHandler(fh2)
 # Constants and Static data imports
 ##############################################
 
-pg.PAUSE = 2
+pg.PAUSE = 1
 MAX_API_ATTEMPTS = 5
 MAX_DELTA_ISK = 20000000
 INV_TYPES = pd.read_csv('static/invTypes.csv')
@@ -64,7 +64,7 @@ def typeID_to_name(type_id):
     """Look up item type name by typeID"""
     return INV_TYPES.loc[INV_TYPES.typeID == type_id].typeName.values[0]
 
-def retry_timeout(timeout, sleep_time=3):
+def retry_timeout(timeout, sleep_time=5):
     """Decorator to attempt a function until a timeout expires"""
     def retry(func):
         def func_wrapper(*args, **kwargs):
@@ -78,7 +78,11 @@ def retry_timeout(timeout, sleep_time=3):
                 try:
                     return func(*args, **kwargs)
                 except ValueError:
-                    logger.exception('exception in retry_timeout decorated function')
+                    logger.error('ValueError exception in retry_timeout decorated function')
+                    attempt += 1
+                    time.sleep(sleep_time)
+		except Exception:
+                    logger.error('exception in retry_timeout decorated function')
                     attempt += 1
                     time.sleep(sleep_time)
 
@@ -172,6 +176,12 @@ class LauncherNotStartedException(Exception):
     """Exception for when the EVE launcher doesn't start"""
     pass
 
+class WindowNotFoundException(Exception):
+    """Exception for when a specified window isn't found"""
+
+    def __init__(self, window_name, window_path):
+	    self.window_name = window_name
+	    self.window_path = window_path
 
 ##############################################
 # Utility functions
@@ -219,6 +229,7 @@ def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_
 
     matches = np.array(np.where(result_arr >= threshold))
     if matches.size == 0:
+        logger.exception('Could not find template %s', template_path)
         raise TemplateNotFoundException
 
     (_, maxMatch, _, maxLoc) = cv2.minMaxLoc(result_arr)
@@ -267,8 +278,8 @@ def click_img(img_path, button='left'):
     img_center = [coord + offset for coord, offset in zip(img_pos, [offset_x, offset_y])]
 
     # add a uniform jitter over the whole image
-    jitter_x = np.random.randint(-offset_x, offset_x)
-    jitter_y = np.random.randint(-offset_y, offset_y)
+    jitter_x = np.random.randint(-offset_x, offset_x) * 0.8
+    jitter_y = np.random.randint(-offset_y, offset_y) * 0.8
 
     moveTo(img_center, jitter=(jitter_x, jitter_y))
     pg.click(button=button)
@@ -318,7 +329,7 @@ def open_client_window(window_name):
     hotkey_dict = {'market': 'r',
                    'wallet': 'w'}
 
-    img_dict = {'market': 'images/client-market-header.png'}
+    img_dict = {'market': 'images/client-market-header2.png'}
 
     window_img = img_dict[window_name]
 
@@ -440,6 +451,7 @@ def modify_order(this_order_pos, order_type, interactive=False):
             else:
                 click_img('images/client-popup-cancel.png')
         else:
+            wait_for_window('Order confirmation', 'images/client-popup-ok.png')
             cached_char_orders.update(char_order, new_price)
             click_img('images/client-popup-ok.png')
             time.sleep(2)
@@ -512,7 +524,7 @@ def choose_price(order_type, char_order, market_orders):
 # API call functions
 ##############################################
 
-@retry_timeout(20)
+@retry_timeout(40)
 def get_market_orders(region_id='10000030', type_id='34'):
     """Get the current market orders for an item in a region.
 
@@ -576,7 +588,7 @@ def get_char_orders():
     return char_orders
 
 
-def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_threshold=0.2):
+def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_threshold=0.2, diff_threshold=3):
     """Match the name and price scraped from the screen to info gathered from the API"""
 
     if char_orders is None:
@@ -599,7 +611,7 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
     # raise an exception if the ocr strings don't match anything
     pct_diff = best_match_diff / len(to_match)
 
-    if pct_diff > pct_threshold:
+    if (pct_diff > pct_threshold) and (best_match_diff > diff_threshold):
         logger.error('trying to match (%s %s) Best match (%s %s). Distance pct %.2f}',
                      name_text, price_text, best_match.typeName, best_match.price, pct_diff)
         raise NoOCRMatchException
@@ -662,7 +674,7 @@ def wait_for_window(window_name, window_img_path, timeout=60):
     logger.debug('Waiting for %s to load', window_name)
 
     # so that cursor isn't over anything important
-    pg.moveTo(10, 10)
+    #pg.moveTo(10, 10)
 
     t_start = dt.datetime.now()
     t_wait = dt.timedelta(seconds=timeout)
@@ -678,7 +690,7 @@ def wait_for_window(window_name, window_img_path, timeout=60):
 
     # should only get here if we timed out
     logger.error('Could not find %s window', window_name)
-    return False
+    raise WindowNotFoundException(window_name, window_img_path)
 
 
 def quit_launcher():
@@ -716,6 +728,7 @@ def cold_start():
     login_trader()
     wait_for_window('In-game GUI', 'images/client-ingame-gui.png')
     open_client_window('market')
+    wait_for_window('In-game market window', 'images/client-market-header2.png')
     click_img('images/client-market-myorders-dim.png')
 
 
@@ -735,7 +748,7 @@ if __name__ == '__main__':
 
     updates = 0
 
-    while updates < 6:
+    while updates < 10:
         cold_start()
         logger.info('Updating orders for %d time', updates)
         update_all_orders(interactive=False)
