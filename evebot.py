@@ -65,54 +65,69 @@ def typeID_to_name(type_id):
     return INV_TYPES.loc[INV_TYPES.typeID == type_id].typeName.values[0]
 
 
-def func_wrapper_ntimes(func, *args, **kwargs):
-    """Wrapper for use in decorators to retry a function a set number of times"""
+class retry_timeout:
+    """Decorator class to retry something for a specified length of time"""
 
-    attempt = 0
+    def __init__(self, timeout, sleep_time=5):
+        self.timeout = timeout
+        self.sleep_time = sleep_time
 
-    while attempt < max_attempts:
+    def __call__(self, func):
+        """Try to call func until it succeeds, waiting for up to timeout seconds"""
+        
+        def wrapped_func(*args, **kwargs):
 
-        try:
-            return func(*args, **kwargs)
-        except ValueError:
-            logger.error('ValueError exception in retry_timeout decorated function')
-            attempt += 1
-            time.sleep(sleep_time)
+            t_start = dt.datetime.now()
+            t_wait = dt.timedelta(seconds=self.timeout)
+            attempt = 0
+            func_succeeded = False
 
-    logger.error('Failed %s after %d attempts', str(func), attempt)
+            while dt.datetime.now() < t_start + t_wait:
 
+                try:
+                    func(*args, **kwargs)
+                    func_succeeded = True
+                    break
+                except:
+                    logger.error('Failed function %s on attempt %d', func.__name__, attempt)
+                    attempt += 1 
+                    time.sleep(self.sleep_time)
 
-def func_wrapper_timeout(func, *args, **kwargs):
-    """Wrapper for use in decorators to retry a function until a timeout period expires"""
+            if not func_succeeded:
+                raise
 
-    t_start = dt.datetime.now()
-    t_wait = dt.timedelta(seconds=timeout)
-    attempt = 0
-
-    while dt.datetime.now() < t_start + t_wait:
-
-        try:
-            return func(*args, **kwargs)
-        except ValueError:
-            logger.error('ValueError exception in retry_timeout decorated function')
-            attempt += 1
-            time.sleep(sleep_time)
-
-    logger.error('Failed %s after %d attempts in %d seconds', str(func), attempt, timeout)
+        return wrapped_func
 
 
-def retry_timeout(timeout, sleep_time=5):
-    """Decorator to attempt a function until a timeout expires"""
-    def retry(func):
-        return func_wrapper_timeout
-    return retry
+class retry_ntimes:
+    """Decorator class to retry something n times"""
 
+    def __init__(self, n_times, sleep_time=5):
+        self.max_attempts = n_times
+        self.sleep_time = sleep_time
 
-def retry_ntimes(max_attempts, sleep_time=5):
-    """Decorator to attempt a function a set number of times"""
-    def retry(func):
-        return func_wrapper_ntimes
-    return retry
+    def __call__(self, func):
+        """Try to call func until it succeeds, up to n_times attempts"""
+        
+        def wrapped_func(*args, **kwargs):
+
+            attempt = 0
+            func_succeeded = False
+
+            while attempt < self.max_attempts:
+                try:
+                    func(*args, **kwargs)
+                    func_succeeded = True
+                    break
+                except:
+                    logger.error('Failed function %s on attempt %d', func.__name__, attempt)
+                    attempt += 1 
+                    time.sleep(self.sleep_time)
+
+            if not func_succeeded:
+                raise
+
+        return wrapped_func
 
 
 class CachedCharacterOrders():
