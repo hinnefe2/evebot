@@ -8,7 +8,11 @@ import re
 import time
 import logging
 import datetime as dt
+import sqlite3
 from xml.etree import ElementTree
+
+from sqlite3 import OperationalError
+from pandas.io.sql import DatabaseError
 
 import requests as rq
 import PIL
@@ -84,16 +88,14 @@ class retry_timeout:
             while dt.datetime.now() < t_start + t_wait:
 
                 try:
-                    func(*args, **kwargs)
-                    func_succeeded = True
-                    break
+                    return func(*args, **kwargs)
                 except Exception as e:
                     logger.error('Failed function %s on attempt %d with exception %s', func.__name__, attempt, e)
                     attempt += 1 
                     time.sleep(self.sleep_time)
 
-            if not func_succeeded:
-                raise
+	    # should only get here if the decorated function failed
+            raise
 
         return wrapped_func
 
@@ -115,16 +117,14 @@ class retry_ntimes:
 
             while attempt < self.max_attempts:
                 try:
-                    func(*args, **kwargs)
-                    func_succeeded = True
-                    break
+                    return func(*args, **kwargs)
                 except:
                     logger.error('Failed function %s on attempt %d', func.__name__, attempt)
                     attempt += 1 
                     time.sleep(self.sleep_time)
 
-            if not func_succeeded:
-                raise
+	    # should only get here if the decorated function failed
+            raise
 
         return wrapped_func
 
@@ -203,7 +203,7 @@ class CachedCharacterOrders():
         """Update the locally stored information with data from 
         the API if the local cache has expired"""
         
-        if (dt.datetime.utcnow() > self.data.cached_until.head(1)).any():
+        if (dt.datetime.utcnow() > self.data.get_value(0,'cached_until')):
             self._pull_from_api()
             self._push_to_db()
             
@@ -296,7 +296,7 @@ def match_template(template_path, screen=None, threshold=0.9, how=cv2.TM_CCOEFF_
 
     matches = np.array(np.where(result_arr >= threshold))
     if matches.size == 0:
-        logger.error('Could not find template %s', template_path)
+        logger.debug('Could not find template %s', template_path)
         raise TemplateNotFoundException
 
     (_, maxMatch, _, maxLoc) = cv2.minMaxLoc(result_arr)
@@ -584,7 +584,7 @@ def choose_price(order_type, char_order, market_orders):
 # API call functions
 ##############################################
 
-@retry_timeout(40)
+@retry_timeout(20)
 def get_market_orders(region_id='10000030', type_id='34'):
     """Get the current market orders for an item in a region.
 
@@ -610,7 +610,6 @@ def get_market_orders(region_id='10000030', type_id='34'):
     orders['stationID'] = orders.location.apply(extract_station_id)
 
     # TODO add logging of snapshot to database
-
     return orders.convert_objects(convert_numeric=True).sort_values('price')
 
 
@@ -624,8 +623,9 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
 
     # only search in buys or sells to prevent accidentally matching on wrong order type
     buys_or_sells = char_orders.loc[char_orders.bid == buysell_dict[order_type]]
+
     # catenate ocr strings, compare to api strings w levenshtein distance
-    to_search = buys_or_sells.apply(lambda row: row.typeName + row.price_str, axis=1)
+    to_search = buys_or_sells.apply(lambda row: str(row.typeName + '{:.2f}'.format(row.price)), axis=1)
 
     to_match = name_text + price_text
     lev_distance = to_search.apply(lev.distance, args=[to_match])
@@ -697,7 +697,7 @@ def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelaunch
         raise
 
     # check if the launcher is running
-    wait_for_window('EVE launcher', 'images/launcher-header.png')
+    wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
     logger.debug('Successfully started launcher')
 
 
@@ -709,7 +709,8 @@ def start_eve():
     click_img('images/launcher-login-small.png')
 
     # check if the launcher is running
-    wait_for_window('Character selection', 'images/client-theoname.png')
+    # TODO: put wait_for_window time in config
+    wait_for_window('Character selection', 'images/client-theoname.png', 60)
     logger.debug('Successfully started EVE client')
 
 
@@ -724,7 +725,8 @@ def start_character():
     click_img('images/client-theoface-small.png')
 
     # check if the in-game gui has loaded
-    wait_for_window('In-game GUI', 'images/client-ingame-gui.png')
+    # TODO: put wait_for_window time in config
+    wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
     logger.debug('Successfully started logged in character')
 
 
@@ -787,12 +789,13 @@ if __name__ == '__main__':
 
     while updates < 10:
         cold_start()
+        time.sleep(2)
         logger.info('Updating orders for %d time', updates)
         update_all_orders(interactive=False)
         cold_stop()
 
         updates += 1
-        time.sleep(update_period + np.random.randint(0, update_jitter)
+        time.sleep(update_period + np.random.randint(0, update_jitter))
 
 
 #        # wait for the order api cache to update
