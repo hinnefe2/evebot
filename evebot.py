@@ -12,7 +12,6 @@ from xml.etree import ElementTree
 
 import requests as rq
 import PIL
-import psutil
 import numpy as np
 import pandas as pd
 import cv2
@@ -88,8 +87,8 @@ class retry_timeout:
                     func(*args, **kwargs)
                     func_succeeded = True
                     break
-                except:
-                    logger.error('Failed function %s on attempt %d', func.__name__, attempt)
+                except Exception as e:
+                    logger.error('Failed function %s on attempt %d with exception %s', func.__name__, attempt, e)
                     attempt += 1 
                     time.sleep(self.sleep_time)
 
@@ -152,7 +151,7 @@ class CachedCharacterOrders():
     def _pull_from_api(self):
         """Pull the data from the API"""
         
-        print('Querying character orders from XML API')
+        self.logger.debug('Querying character orders from XML API')
         resp = rq.get(self.api_url.format(self.key_id, self.access_code))
         tree = ElementTree.fromstring(resp.content)
         
@@ -170,14 +169,14 @@ class CachedCharacterOrders():
         names = INV_TYPES[['typeID', 'typeName']]
         char_orders = char_orders.merge(names, on='typeID', how='left')
 
-        print('Got character orders from XML API')
+        self.logger.debug('Got character orders from XML API')
         
         char_orders['cached_until'] = self.api_cached_until
         char_orders['last_updated'] = dt.datetime.utcnow()
         
         self.data = char_orders
 
-        print('API character orders cached until %s UTC', self.api_cached_until)
+        self.logger.debug('API character orders cached until %s UTC', self.api_cached_until)
         
 
     def _push_to_db(self, db_file='orders.sqlite'):
@@ -243,10 +242,6 @@ class NoOCRMatchException(Exception):
     """Exception for when order information extracted via OCR can't be matched to orders"""
     pass
 
-
-class LauncherNotStartedException(Exception):
-    """Exception for when the EVE launcher doesn't start"""
-    pass
 
 class WindowNotFoundException(Exception):
     """Exception for when a specified window isn't found"""
@@ -513,27 +508,20 @@ def modify_order(this_order_pos, order_type, interactive=False):
         paste_text(new_price)
 
         if interactive:
-            # click on 'OK' button in modify popup
-            if pg.confirm() == 'OK':
-                click_img('images/client-popup-ok.png')
-                cached_char_orders.update_row(char_order, new_price)
-                # wait for potential 'WARNING' window to pop open
-                time.sleep(2)
-            # click on 'CANCEL' button in modify popup
-            else:
-                click_img('images/client-popup-cancel.png')
-        else:
-            wait_for_window('Order confirmation', 'images/client-popup-ok.png')
-            cached_char_orders.update_row(char_order, new_price)
-            click_img('images/client-popup-ok.png')
-            time.sleep(2)
+            pg.confirm('Confirm?')
+
+        wait_for_window('Order confirmation', 'images/client-popup-ok.png')
+        cached_char_orders.update_row(char_order, new_price)
+        click_img('images/client-popup-ok.png')
+        time.sleep(2)
 
         # if order is > x% off from market average
+        # TODO: put wait time in config file
         try:
-            match_template('images/client-popup-warning.png')
+            wait_for_window('Price warning window', 'images/client-popup-warning.png', 5)
             click_img('images/client-popup-yes.png')
             time.sleep(2)
-        except TemplateNotFoundException:
+        except WindowNotFoundException:
             pass
 
 
@@ -626,40 +614,6 @@ def get_market_orders(region_id='10000030', type_id='34'):
     return orders.convert_objects(convert_numeric=True).sort_values('price')
 
 
-@retry_timeout(20)
-def get_char_orders():
-    """Get a character's current market orders.
-
-    API has 1 hour cache time."""
-
-    theo_keyID = '442571'
-    theo_code = '7qdTnpfrBfL3Gw2elwKaT9SsGkn6O5gwV3QUM77S3pHPanRBzzDyql5pCUU7V0bS'
-
-    xml_orders_url = 'https://api.eveonline.com/char/MarketOrders.xml.aspx?keyID={}&vCode={}'
-
-    logger.debug('Querying character orders from XML API')
-    resp = rq.get(xml_orders_url.format(theo_keyID, theo_code))
-
-    # ugly, but can't get lxml to work with bs4
-    tree = ElementTree.fromstring(resp.content)
-    char_orders = pd.DataFrame(
-        [r.attrib
-         for r
-         in tree.getchildren()[1].getchildren()[0].getchildren()
-        ]).convert_objects(convert_numeric=True)
-
-    # add a column with price as string
-    char_orders['price_str'] = char_orders['price'].map('{:.2f}'.format)
-
-    # join the typeNames to the orders dataframe
-    names = INV_TYPES[['typeID', 'typeName']]
-    char_orders = char_orders.merge(names, on='typeID', how='left')
-
-    logger.debug('Got character orders from XML API')
-
-    return char_orders
-
-
 def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_threshold=0.2, diff_threshold=3):
     """Match the name and price scraped from the screen to info gathered from the API"""
 
@@ -698,61 +652,17 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
 # Startup / shutdown functions
 #################################################
 
-@retry_timeout(20)
-def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelauncher.exe"):
-    """Start the EVE launcher"""
-
-    logger.debug('Starting EVE launcher')
-
-    try:
-        os.startfile(launcher_path)
-    except:
-        logger.error('Could not run %s', launcher_path)
-        return False
-
-    def get_proc_name(process):
-        """Extract process name from psutil.process instance"""
-        try:
-            return process.name()
-        except:
-            return None
-
-    # check if the launcher is running
-    process_names = list([get_proc_name(proc) for proc in psutil.process_iter()])
-
-    # if the launcher process is found return True
-    if 'evelauncher.exe' in process_names:
-        logger.debug('Successfully started launcher')
-        return
-    else:
-        raise LauncherNotStartedException
-
-
-def start_eve():
-    """Launch the EVE client by clicking on the launcher login button."""
-
-    logger.debug('Starting EVE client')
-    click_img('images/launcher-login-small.png')
-    return True
-
-
-def wait_for_window(window_name, window_img_path, timeout=60, retry=False, retry_fn=None):
+def wait_for_window(window_name, window_img_path, timeout=10):
     """Wait for the window identified by window_img to load
 
     Args:
      window_name(str): the name of the window, for logging purposes
      window_img_path(str): the path the the template image which identifies the window
      timeout(int): the number of seconds to wait for the window
-     retry(bool): whether to retry opening the window if it isn't detected after the timout
-     retry_fn: a functino which will attempt to open the window
 
     Raises:
      WindowNotFoundException: if the specified window isn't detected after the timeout period
     """
-
-    # if we want to retry opening a window we have to supply a function to open the window
-    if retry:
-        assert retry_fn is not None, 'if retrying must supply a retry function'
 
     logger.debug('Waiting for %s to load', window_name)
 
@@ -764,19 +674,73 @@ def wait_for_window(window_name, window_img_path, timeout=60, retry=False, retry
         try:
             match_template(window_img_path)
             logger.debug('%s window ready', window_name)
-            return True
+            return
         except TemplateNotFoundException:
             time.sleep(5)
 
     # should only get here if we timed out
     logger.error('Could not find %s window', window_name)
 
-    # if we want to retry opening the window
-    if retry:
-        
-    else:
-        raise WindowNotFoundException(window_name, window_img_path)
+    raise WindowNotFoundException(window_name, window_img_path)
 
+
+@retry_timeout(20)
+def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelauncher.exe"):
+    """Start the EVE launcher"""
+
+    logger.debug('Starting EVE launcher')
+
+    try:
+        os.startfile(launcher_path)
+    except:
+        logger.error('Could not run %s', launcher_path)
+        raise
+
+    # check if the launcher is running
+    wait_for_window('EVE launcher', 'images/launcher-header.png')
+    logger.debug('Successfully started launcher')
+
+
+@retry_timeout(20)
+def start_eve():
+    """Launch the EVE client by clicking on the launcher login button."""
+
+    logger.debug('Starting EVE client')
+    click_img('images/launcher-login-small.png')
+
+    # check if the launcher is running
+    wait_for_window('Character selection', 'images/client-theoname.png')
+    logger.debug('Successfully started EVE client')
+
+
+@retry_timeout(20)
+def start_character():
+    """Login to the client with the trading character"""
+
+    # so that cursor isn't on top of character portrait
+    pg.moveTo(100, 100)
+
+    logger.debug('Logging in trading character')
+    click_img('images/client-theoface-small.png')
+
+    # check if the in-game gui has loaded
+    wait_for_window('In-game GUI', 'images/client-ingame-gui.png')
+    logger.debug('Successfully started logged in character')
+
+
+@retry_timeout(20)
+def start_market():
+    """Open the in-game market window"""
+
+    logger.debug('Opening in-game market window')
+    open_client_window('market')
+
+    # check if the market screen is up
+    wait_for_window('In-game market window', 'images/client-market-header2.png')
+    logger.debug('Successfully opened in-game market window')
+
+    # TODO: add a wait_for_window(my orders window)
+    click_img('images/client-market-myorders-dim.png')
 
 def quit_launcher():
     """Close the launcher"""
@@ -793,28 +757,13 @@ def quit_client():
     click_img('images/client-popup-quit.png')
 
 
-def login_trader():
-    """Login to the client with the trading character"""
-
-    # so that cursor isn't on top of character portrait
-    pg.moveTo(100, 100)
-
-    logger.debug('Logging in trading character')
-    click_img('images/client-theoface-small.png')
-
-
 def cold_start():
     """Get client to trading state (client running, market window open)"""
 
     start_launcher()
-    wait_for_window('EVE launcher', 'images/launcher-header.png')
     start_eve()
-    wait_for_window('Character selection', 'images/client-theoname.png')
-    login_trader()
-    wait_for_window('In-game GUI', 'images/client-ingame-gui.png')
-    open_client_window('market')
-    wait_for_window('In-game market window', 'images/client-market-header2.png')
-    click_img('images/client-market-myorders-dim.png')
+    start_character()
+    start_market()
 
 
 def cold_stop():
@@ -831,6 +780,9 @@ if __name__ == '__main__':
 
     cached_char_orders = CachedCharacterOrders()
 
+    update_period = 600
+    update_jitter = 180
+
     updates = 0
 
     while updates < 10:
@@ -839,14 +791,17 @@ if __name__ == '__main__':
         update_all_orders(interactive=False)
         cold_stop()
 
-        # wait for the order api cache to update
-        until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
-
-        while until_cache_update > dt.timedelta(0):
-            logger.debug('waiting for order cache to update. %d more seconds', until_cache_update.seconds)
-            time.sleep(300)
-            until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
-
-        # sleep a random amount of time so we're not updating immediately after the cache
-        time.sleep(np.random.randint(5, 600))
         updates += 1
+        time.sleep(update_period + np.random.randint(0, update_jitter)
+
+
+#        # wait for the order api cache to update
+#        until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
+#
+#        while until_cache_update > dt.timedelta(0):
+#            logger.debug('waiting for order cache to update. %d more seconds', until_cache_update.seconds)
+#            time.sleep(300)
+#            until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
+#
+#        # sleep a random amount of time so we're not updating immediately after the cache
+#        updates += 1
