@@ -133,62 +133,96 @@ class retry_ntimes:
 class CachedCharacterOrders():
     """Class to store the result of a cached API call"""
 
-    def __init__(self):
+    def __init__(self, db_file='orders.sqlite'):
+        
         self.logger = logging.getLogger(__name__)
         self.key_id = '442571'
         self.access_code = '7qdTnpfrBfL3Gw2elwKaT9SsGkn6O5gwV3QUM77S3pHPanRBzzDyql5pCUU7V0bS'
         self.api_url = 'https://api.eveonline.com/char/MarketOrders.xml.aspx?keyID={}&vCode={}'
+        
+        try:
+            self._pull_from_db()
+            self.update_from_api()
+        except (OperationalError, DatabaseError):
+            self.logger.debug('No database found, pulling from API')
+            self._pull_from_api()
+            self._push_to_db()
 
-        self.api_cached_until = dt.datetime(2000, 1, 1)
-        self.last_updated_locally = dt.datetime.utcnow()
-        self.data = pd.DataFrame()
 
-        self.pull()
-
-    def pull(self):
+    def _pull_from_api(self):
         """Pull the data from the API"""
-        self.logger.debug('Querying character orders from XML API')
+        
+        print('Querying character orders from XML API')
         resp = rq.get(self.api_url.format(self.key_id, self.access_code))
-
-        # ugly, but can't get lxml to work with bs4
         tree = ElementTree.fromstring(resp.content)
+        
+        # in UTC, but w/out tzinfo in the datetime object
+        self.api_cached_until = pd.to_datetime(tree.getchildren()[2].text)
+        
+        # ugly, but can't get lxml to work with bs4
         char_orders = pd.DataFrame(
             [r.attrib
              for r
              in tree.getchildren()[1].getchildren()[0].getchildren()
             ]).convert_objects(convert_numeric=True)
 
-        # add a column with price as string
-        char_orders['price_str'] = char_orders['price'].map('{:.2f}'.format)
-
         # join the typeNames to the orders dataframe
         names = INV_TYPES[['typeID', 'typeName']]
         char_orders = char_orders.merge(names, on='typeID', how='left')
 
-        self.logger.debug('Got character orders from XML API')
-
-        # in UTC, but w/out tzinfo in the datetime object
-        self.api_cached_until = pd.to_datetime(tree.getchildren()[2].text)
+        print('Got character orders from XML API')
+        
+        char_orders['cached_until'] = self.api_cached_until
+        char_orders['last_updated'] = dt.datetime.utcnow()
+        
         self.data = char_orders
 
-        self.logger.debug('API character orders cached until %s UTC', self.api_cached_until)
+        print('API character orders cached until %s UTC', self.api_cached_until)
+        
 
-    def update(self, old_row, new_price):
+    def _push_to_db(self, db_file='orders.sqlite'):
+        """Push the local orders dataframe to the database, replacing existing data"""
+        
+        with sqlite3.connect(db_file) as conn:
+            self.data.to_sql('orders', conn, if_exists='replace')
+            
+
+    def _pull_from_db(self, db_file='orders.sqlite'):
+        """Pull the database into the local orders dataframe, replacing existing data"""
+        
+        with sqlite3.connect(db_file) as conn:
+            sql = 'SELECT * FROM main.orders'
+            date_cols = ['issued', 'cached_until', 'last_updated']
+            
+            try:
+                self.data = pd.read_sql(sql, conn, parse_dates=date_cols)
+            except DatabaseError:
+                raise
+
+
+    def update_from_api(self):
+        """Update the locally stored information with data from 
+        the API if the local cache has expired"""
+        
+        if (dt.datetime.utcnow() > self.data.cached_until.head(1)).any():
+            self._pull_from_api()
+            self._push_to_db()
+            
+
+    def update_row(self, old_row, new_price):
         """Update the locally stored information to reflect
         changes that haven't yet appeared in the API due to caching"""
-
-        if dt.datetime.utcnow() > self.api_cached_until:
-            self.pull()
-
+        
+        # update from the API first, if necessary
+        self.update_from_api()
+        
         # update the price information
         order_id = old_row.orderID
-        print(order_id)
-
+        
         self.data.loc[self.data.orderID == order_id, 'price'] = new_price
-
-    def get(self):
-        """Return the character order dataframe"""
-        return self.data
+        self.data.loc[self.data.orderID == order_id, 'last_updated'] = dt.datetime.utcnow()
+        
+        self._push_to_db()
 
 
 ##############################################
@@ -409,7 +443,7 @@ def update_all_orders(interactive=False):
     selling_to_order_offset = np.array([80, 19])
     order_pos = selling_pos + selling_to_order_offset
 
-    char_orders = cached_char_orders.get()
+    char_orders = cached_char_orders.data
     n_selling = len(char_orders.loc[(char_orders.bid == 0) & (char_orders.orderState == 0)])
     logger.debug('Checking %d SELL orders', n_selling)
 
@@ -482,7 +516,7 @@ def modify_order(this_order_pos, order_type, interactive=False):
             # click on 'OK' button in modify popup
             if pg.confirm() == 'OK':
                 click_img('images/client-popup-ok.png')
-                cached_char_orders.update(char_order, new_price)
+                cached_char_orders.update_row(char_order, new_price)
                 # wait for potential 'WARNING' window to pop open
                 time.sleep(2)
             # click on 'CANCEL' button in modify popup
@@ -490,7 +524,7 @@ def modify_order(this_order_pos, order_type, interactive=False):
                 click_img('images/client-popup-cancel.png')
         else:
             wait_for_window('Order confirmation', 'images/client-popup-ok.png')
-            cached_char_orders.update(char_order, new_price)
+            cached_char_orders.update_row(char_order, new_price)
             click_img('images/client-popup-ok.png')
             time.sleep(2)
 
@@ -630,7 +664,7 @@ def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_thr
     """Match the name and price scraped from the screen to info gathered from the API"""
 
     if char_orders is None:
-        char_orders = cached_char_orders.get()
+        char_orders = cached_char_orders.data
 
     buysell_dict = {'sell': 0, 'buy': 1}
 
@@ -806,11 +840,12 @@ if __name__ == '__main__':
         cold_stop()
 
         # wait for the order api cache to update
-        until_cache_update = cached_char_orders.api_cached_until - dt.datetime.utcnow()
+        until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
+
         while until_cache_update > dt.timedelta(0):
             logger.debug('waiting for order cache to update. %d more seconds', until_cache_update.seconds)
             time.sleep(300)
-            until_cache_update = cached_char_orders.api_cached_until - dt.datetime.utcnow()
+            until_cache_update = cached_char_orders.data.get_value(0, 'cached_until') - dt.datetime.utcnow()
 
         # sleep a random amount of time so we're not updating immediately after the cache
         time.sleep(np.random.randint(5, 600))
