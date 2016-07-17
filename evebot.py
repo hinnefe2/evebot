@@ -45,7 +45,7 @@ fh2.setLevel(logging.INFO)
 # for logging to console
 ch = logging.StreamHandler()
 ch.setFormatter(formatter)
-ch.setLevel(logging.DEBUG)
+ch.setLevel(logging.INFO)
 
 # add handlers to logger
 logger.addHandler(ch)
@@ -59,13 +59,13 @@ logger.addHandler(fh2)
 
 pg.PAUSE = 1
 MAX_API_ATTEMPTS = 5
-MAX_DELTA_ISK = 20000000
+MAX_DELTA_ISK = 30000000
 INV_TYPES = pd.read_csv('static/invTypes.csv')
 
 
 def typeID_to_name(type_id):
     """Look up item type name by typeID"""
-    return INV_TYPES.loc[INV_TYPES.typeID == type_id].typeName.values[0]
+    return INV_TYPES.loc[INV_TYPES.typeID == int(type_id)].typeName.values[0]
 
 
 class retry_timeout:
@@ -124,7 +124,14 @@ class retry_ntimes:
                     time.sleep(self.sleep_time)
 
 	    # should only get here if the decorated function failed
-            raise
+
+	    try:
+                match_template('images/client-connectionlost.png')
+		click_img('images/client-popup-connectionlostquit.png')
+		quit_launcher()
+		cold_start()
+	    except:
+		    raise
 
         return wrapped_func
 
@@ -394,9 +401,11 @@ def open_client_window(window_name):
     """Open a window in the client"""
 
     hotkey_dict = {'market': 'r',
-                   'wallet': 'w'}
+                   'wallet': 'w',
+		   'assets': 'c'}
 
-    img_dict = {'market': 'images/client-market-header2.png'}
+    img_dict = {'market': 'images/client-market-header2.png',
+		'assets': 'images/client-assets/header.png'}
 
     window_hkey = hotkey_dict[window_name]
     window_img = img_dict[window_name]
@@ -426,6 +435,52 @@ def open_client_window(window_name):
 
     logger.debug("Opened client window '%s'", window_name)
 
+def close_client_window(window_name):
+    """Close a window in the client"""
+
+    hotkey_dict = {'market': 'r',
+                   'wallet': 'w',
+		   'assets': 'c'}
+
+    img_dict = {'market': 'images/client-market-header2.png',
+		'assets': 'images/client-assets/header.png'}
+
+    window_hkey = hotkey_dict[window_name]
+    window_img = img_dict[window_name]
+
+    # if we can find the window header then close it
+    try:
+        match_template(window_img)
+
+        pg.keyDown('alt')
+        pg.press(window_hkey)
+        pg.keyUp('alt')
+
+    # if we can't find the window header then do nothing
+    except TemplateNotFoundException:
+	pass
+
+    # wait for the window to load
+    time.sleep(2)
+
+    logger.debug("Closed client window '%s'", window_name)
+
+def sell_assets(interactive=False):
+    """Iterate through all assets in the Inventory -> Item Hangar screen
+    and list them for sale if the available price is appropriate."""
+
+    # find location of header row
+    header_pos = match_template('images/client-assets-itemhangar-header.png')
+
+    # TODO make order pos offset tidier
+    header_to_items_offset = np.array([0, 65])
+    items_pos = header_pos + header_to_items_offset
+
+    for i in range(20):
+        this_item_pos = np.array([items_pos[0], items_pos[1] + 20 * i])
+
+        name_text, price_text = ocr_row(this_items_pos)
+        print(name_text, price_text)
 
 def update_all_orders(interactive=False):
     """Iterate through all orders on the Market -> My Orders screen
@@ -537,7 +592,7 @@ def choose_price(order_type, char_order, market_orders):
     type_name = char_order.typeName
 
     # minimum sell-buy margin to update on
-    margin_threshold = 0.1
+    margin_threshold = 0.08
 
     # separate buy and sell orders
     buy_orders = market_orders.loc[market_orders.buy == True]
@@ -584,13 +639,13 @@ def choose_price(order_type, char_order, market_orders):
 # API call functions
 ##############################################
 
-@retry_timeout(20)
+@retry_ntimes(3)
 def get_market_orders(region_id='10000030', type_id='34'):
     """Get the current market orders for an item in a region.
 
     API has 6 min cache time."""
 
-    crest_order_url = 'https://crest-tq.eveonline.com/market/{}/orders/{}/?type=https://public-crest.eveonline.com/types/{}/'
+    crest_order_url = 'https://crest-tq.eveonline.com/market/{}/orders/{}/?type=https://public-crest.eveonline.com/inventory/types/{}/'
 
     dfs = []
     for order_type in ['buy', 'sell']:
@@ -679,12 +734,12 @@ def wait_for_window(window_name, window_img_path, timeout=10):
             time.sleep(5)
 
     # should only get here if we timed out
-    logger.error('Could not find %s window', window_name)
+    logger.debug('Could not find %s window', window_name)
 
     raise WindowNotFoundException(window_name, window_img_path)
 
 
-@retry_timeout(20)
+@retry_ntimes(3)
 def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelauncher.exe"):
     """Start the EVE launcher"""
 
@@ -697,7 +752,12 @@ def start_launcher(launcher_path=r"C:\Program Files (x86)\EVE\Launcher\evelaunch
         raise
 
     # check if the launcher is running
-    wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
+    try:
+        wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
+    except WindowNotFoundException:
+	quit_launcher()
+	raise
+
     logger.debug('Successfully started launcher')
 
 
@@ -756,7 +816,7 @@ def quit_client():
 
     pg.press('esc')
     time.sleep(2)
-    click_img('images/client-popup-quit.png')
+    click_img('images/client-popup-logoff.png')
 
 
 def cold_start():
@@ -765,12 +825,14 @@ def cold_start():
     start_launcher()
     start_eve()
     start_character()
+    quit_launcher()
     start_market()
 
 
 def cold_stop():
     """Close the client and the launcher"""
 
+    close_client_window('market')
     quit_client()
     quit_launcher()
 
@@ -782,12 +844,12 @@ if __name__ == '__main__':
 
     cached_char_orders = CachedCharacterOrders()
 
-    update_period = 600
+    update_period = 400
     update_jitter = 180
 
     updates = 0
 
-    while updates < 10:
+    while updates < 50:
         cold_start()
         time.sleep(2)
         logger.info('Updating orders for %d time', updates)
