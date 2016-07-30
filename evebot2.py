@@ -10,8 +10,9 @@ import numpy as np
 import pyautogui as pg
 import pytesseract as pt
 
-from exceptions import WindowNotFoundException
-from exceptions import TemplateNotFoundException
+import .api
+from .exceptions import WindowNotFoundException
+from .exceptions import TemplateNotFoundException
 
 class evebot:
     """A class to handle logging in to the EVE client, and the automated 
@@ -32,9 +33,9 @@ class evebot:
         self.client = ClientManager(self.config)
 
         # instantiate the market-interacting component classes
-        self.updater = OrderUpdater(self.client)
-        self.seller = ItemSeller(self.client)
-        self.buyer = ItemBuyer(self.client)
+        self.updater = OrderUpdater(self.client, self.config, self.cached_orders)
+        self.seller = ItemSeller(self.client, self.config)
+        self.buyer = ItemBuyer(self.client, self.config)
 
 
     def main(self):
@@ -58,7 +59,7 @@ class ClientManager:
         self.logger = logging.getLogger(__name__)
 
     
-    def _wait_for_window(window_name, window_img_path, timeout=10):
+    def wait_for_window(window_name, window_img_path, timeout=10):
         """Wait for the window identified by window_img to load
     
         Args:
@@ -75,12 +76,13 @@ class ClientManager:
         t_start = dt.datetime.now()
         t_wait = dt.timedelta(seconds=timeout)
     
+        # TODO: put window name, image paths in config file
         while dt.datetime.now() < t_start + t_wait:
     
             try:
                 self.find_template(window_img_path)
                 self.logger.debug('%s window ready', window_name)
-                return
+                return True
 
             except TemplateNotFoundException:
                 time.sleep(5)
@@ -102,17 +104,17 @@ class ClientManager:
         try:
             # start the launcher
             os.startfile(config['launcher_path'])
-            _wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
+            wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
             self.logger.debug('started launcher')
     
             # start the EVE client
             self.click_template('images/launcher-login-small.png')
-            _wait_for_window('Character selection', 'images/client-theoname.png', 60)
+            wait_for_window('Character selection', 'images/client-theoname.png', 60)
             self.logger.debug('started client')
         
             # log in trading character
             self.click_template('images/client-theoface-small.png')
-            _wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
+            wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
             self.logger.debug('logged in character')
         
             # kill the launcher (it uses lots of CPU for some reason)
@@ -199,7 +201,7 @@ class ClientManager:
             raise TemplateNotFoundException
     
         (_, maxMatch, _, maxLoc) = cv2.minMaxLoc(result_arr)
-        logger.debug('Found template %s at %s with confidence %s', template_path, maxLoc, maxMatch)
+        self.logger.debug('Found template %s at %s with confidence %s', template_path, maxLoc, maxMatch)
     
         return np.array(maxLoc)
 
@@ -243,10 +245,10 @@ class ClientManager:
 
         hotkey_dict = {'market': 'r',
                        'wallet': 'w',
-    		   'assets': 'c'}
+                       'assets': 'c'}
     
         img_dict = {'market': 'images/client-market-header2.png',
-    		'assets': 'images/client-assets/header.png'}
+                    'assets': 'images/client-assets/header.png'}
     
         # figure out which key and template file are relevant
         window_hkey = hotkey_dict[window_name]
@@ -257,6 +259,18 @@ class ClientManager:
         pg.keyUp('alt')
 
         self.logger.debug("Opened client window '%s'", window_name)
+
+
+    def open_context_menu(self, position, jitter=(0,0)):
+        """Open a context menu by right-clicking at position
+
+        Args:
+            position(tuple): the (x,y) position to right click
+            jitter(tuple): the maximum x and y values to randomly add
+                           to the position to evade detection
+        """
+        self.move_to(position, jitter)
+        pg.click(button='right')
 
 
     def enter_text(self, text):
@@ -281,7 +295,7 @@ class ClientManager:
             width(int): width of the row in px
 
         Returns:
-            ocr_text(str): the text of the row, as identified by OCR
+            name_text(str): the text of the item name, as identified by OCR
         """
         # TODO: refactor this method
         # TODO: put this in config file
@@ -299,47 +313,198 @@ class ClientManager:
         name_snap_x5 = name_snap.resize(np.array(name_snap.size) * 5, PIL.Image.ANTIALIAS)
         name_text = pt.image_to_string(name_snap_x5, config='letters')
     
-        price_top_left = (row_top_left[0] + price_x_offset, row_top_left[1])
-        price_bottom_right = (row_top_left[0] + price_x_offset + price_w, row_top_left[1] + row_y_offset)
+        #price_top_left = (row_top_left[0] + price_x_offset, row_top_left[1])
+        #price_bottom_right = (row_top_left[0] + price_x_offset + price_w, row_top_left[1] + row_y_offset)
     
         # take a screenshot of the 'price' column in the given row, then blow it up 5x
-        price_snap = pg.screenshot(region=wh_from_pos(price_top_left, price_bottom_right))
-        price_snap_x5 = price_snap.resize(np.array(price_snap.size) * 5, PIL.Image.ANTIALIAS)
-        price_text = pt.image_to_string(price_snap_x5, config='letters')
+        #price_snap = pg.screenshot(region=wh_from_pos(price_top_left, price_bottom_right))
+        #price_snap_x5 = price_snap.resize(np.array(price_snap.size) * 5, PIL.Image.ANTIALIAS)
+        #price_text = pt.image_to_string(price_snap_x5, config='letters')
     
         # strip commas, periods, spaces out of price_text, then extract just numbers
-        price_text = price_text.replace('.', '').replace(',', '').replace(' ', '')
-        price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
-        price_float = float(price_text) / 100
+        #price_text = price_text.replace('.', '').replace(',', '').replace(' ', '')
+        #price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
+        #price_float = float(price_text) / 100
     
-        logger.debug('Extracted (typename, price) : (%s, %.2f)', name_text, price_float)
+        self.logger.debug('Extracted item name : (%s)', name_text)
     
-        return (name_text, price_text)
+        return name_text
 
 
 class OrderUpdater:
     """A class to automate the updating of existing market orders"""
 
-    def __init__(self, client):
+    def __init__(self, client, config, cached_orders):
         self.client = client
+        self.config = config
+        self.cached_orders = cached_orders
 
     def open_orders_screen(self):
         """Open the orders screen so that orders can be updated"""
-        pass
 
-    def modify_order(self, position):
-        """Update the order at the specified position"""
-        pass
+        self.client.open_window('market')
+        self.client.wait_for_window('In-game market window', 'images/client-market-header2.png')
 
-    def match_ocr_text(self):
-        """Try to match the OCR'd order text to known orders from the API / cache"""
-        pass
+    def modify_order(self, position, order_type):
+        """Update the order at the specified position
+        
+        Args:
+            position(tuple): the top left corner of the order row
+            order_type(str): 'buy' or 'sell'
+        """
 
+        # get ocr'd item name and price
+        try:
+            name_text = self.client.ocr_row(position)
+        except ValueError:
+            self.logger.error('Failed to ocr row for %s order at %s', order_type, position)
+            return False
+    
+        # match ocr'd info to api info
+        try:
+            this_order = self.cached_orders.match_ocr_text(name_text, order_type)
+        except NoOCRMatchException:
+            self.logger.error('Failed to match OCR order info %s ', name_text)
+            return False
+    
+        if interactive:
+            pg.alert('checking on {}'.format(this_order.typeName))
+    
+        # calculate an appropriate new price
+        new_price = self.choose_price(this_order)
+    
+        # if the best new price is different update the order
+        if new_price != this_order.price:
+    
+            jitter = [np.random.randint(-10, 10), np.random.randint(-2, 2)]
+            # distance from top 'this_order_pos' to center of order text (for clicking)
+            order_center_offset = np.array([50, 9])
+            this_order_pos = position + order_center_offset
+    
+            # open the context menu, click on modify order, paste price
+            self.client.open_context_menu(this_order_pos, jitter)
+            self.client.click_template('Modify order', 'images/client-context-modifyorder.png')
+            time.sleep(1)
+            self.client.enter_text(new_price)
+    
+            if interactive:
+                pg.confirm('Confirm?')
+    
+            self.client.wait_for_window('Order confirmation', 'images/client-popup-ok.png')
+            self.client.click_template('images/client-popup-ok.png')
+            time.sleep(2)
+    
+            self.cached_orders.update_row(this_order, new_price)
+
+            # if order is > x% off from market average
+            # TODO: put wait time in config file
+            try:
+                self.client.wait_for_window('Price warning window', 'images/client-popup-warning.png', 5)
+                self.client.click_template('images/client-popup-yes.png')
+                time.sleep(2)
+            except WindowNotFoundException:
+                pass
+
+
+    def choose_price(self, this_order):
+        """Choose the optimal price for `this_order`
+
+        Args:
+            this_order(pd.Series): pandas series containing info about a 
+                                   currently active character order
+
+        Returns:
+            new_price(float): suggested price for the supplied order
+        """
+
+        old_price = this_order.price
+        type_name = this_order.typeName
+        region_id = lookup_region_id(this_order.stationID)
+        order_type = this_order.bid.map({1:'buy', 2:'sell'})
+
+        # minimum sell-buy margin to update on
+        margin_threshold = 0.08
+        
+        # get market orders
+        # TODO implement caching
+        market_orders = api.get_market_orders(region_id = region_id,
+                                              type_id = this_order.typeID)
+        # separate buy and sell orders
+        buy_orders = market_orders.loc[market_orders.buy == True]
+        sell_orders = market_orders.loc[(market_orders.buy == False) & (market_orders.stationID == char_order.stationID)]
+
+        # CHECK - ours is already the best price
+        if order_type == 'buy':
+            best_price = buy_orders.price.max()
+        else:
+            best_price = sell_orders.price.min()
+        if old_price == best_price:
+            logger.info('%s - HOLD - BEST : %s price of %.2f is already best price', order_type.upper(), type_name, old_price)
+            return old_price
+
+        # CHECK - ISK delta < threshold
+        delta_isk = (best_price - old_price) * char_order.volRemaining
+        if abs(delta_isk) > MAX_DELTA_ISK:
+            logger.info('%s - HOLD - DELTA : %s delta of %.2f is too high', order_type.upper(), type_name, delta_isk)
+            return old_price
+
+        # CHECK - range
+
+        # CHECK - competing volume
+
+        # CHECK - margin is acceptable
+        margin = (sell_orders.price.min() - buy_orders.price.max()) / buy_orders.price.max()
+        if margin < margin_threshold:
+            logger.info('%s - HOLD - MARGIN - %s : margin of %.3f (margin: %.2f best: %.2f current: %.2f) is too small',
+                        order_type.upper(), type_name, margin, margin * buy_orders.price.max(), best_price, old_price)
+            return old_price
+
+        if order_type == 'buy':
+            new_price = buy_orders.price.max() + 0.01
+        else:
+            new_price = sell_orders.price.min() - 0.01
+
+        logger.info('%s - UPDATE %s to %.2f (Old: %.2f, Delta %.2f)',
+                    order_type.upper(), type_name, new_price, old_price, new_price - old_price)
+
+        return new_price
+     
+    
     def main(self):
         """Update all orders"""
-        pass
 
-
+        # find location of first SELL order
+        selling_pos = self.client.find_template('images/client-market-selling.png')
+    
+        # TODO make order pos offset tidier
+        selling_to_order_offset = np.array([80, 19])
+        order_pos = selling_pos + selling_to_order_offset
+    
+        char_orders = cached_orders.data
+        n_selling = len(char_orders.loc[(char_orders.bid == 0) & (char_orders.orderState == 0)])
+        logger.debug('Checking %d SELL orders', n_selling)
+    
+        for i in range(n_selling):
+            this_order_pos = np.array([order_pos[0], order_pos[1] + 20 * i])
+    
+            self.modify_order(this_order_pos, 'sell')
+    
+        # find location of first BUY order
+        buying_pos = self.client.find_template('images/client-market-buying.png')
+    
+        # TODO make order pos offset tidier
+        buying_to_order_offset = np.array([80, 19])
+        order_pos = buying_pos + buying_to_order_offset
+    
+        n_buying = len(char_orders.loc[(char_orders.bid == 1) & (char_orders.orderState == 0)])
+        logger.debug('Checking %d BUY orders', n_buying)
+    
+        for i in range(n_buying):
+            this_order_pos = np.array([order_pos[0], order_pos[1] + 20 * i])
+    
+            self.modify_order(this_order_pos, 'buy', interactive)
+    
+    
 class ItemSeller:
     """A class to automate the selling of items in the inventory"""
 
@@ -361,3 +526,21 @@ class ItemSeller:
     def main(self):
         """Sell some or all items, in order of profit potential"""
         pass
+
+
+def lookup_region_id(station_id):
+    """Look up the region_id of the region containing the station identified by station_id
+    
+    Args:
+        station_id(str): the station_id, as returned by the character market orders api call
+        
+    Returns:
+        region_id(str): the region_id of the region containing the specified station
+    """
+
+    lookup_dict = {'station_id': 'region_id',
+                   '60004588': '10000042',  # Rens
+                   '60008494': '10000043'   # Amarr
+                   }
+
+    return lookup_dict[station_id]
