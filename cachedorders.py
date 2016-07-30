@@ -1,9 +1,18 @@
-from .exceptions import NoOCRMatchException
+import datetime as dt
+import logging
+import requests as rq
+from xml.etree import ElementTree
+
+import pandas as pd
+
+from eveexceptions import NoOCRMatchException
+
+INV_TYPES = pd.read_csv('static/invTypes.csv')
 
 class CachedCharacterOrders():
     """Class to store the result of a cached API call"""
 
-    def __init__(self):
+    def __init__(self, credentials=None):
         self.logger = logging.getLogger(__name__)
         self.key_id = '442571'
         self.access_code = '7qdTnpfrBfL3Gw2elwKaT9SsGkn6O5gwV3QUM77S3pHPanRBzzDyql5pCUU7V0bS'

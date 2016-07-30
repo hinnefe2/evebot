@@ -1,7 +1,8 @@
 """Module to automate trade-oriented interactions with the EVE Online client"""
 
-import datetime
+import datetime as dt
 import logging
+import os
 import time
 import yaml
 
@@ -10,32 +11,48 @@ import numpy as np
 import pyautogui as pg
 import pytesseract as pt
 
-import .api
-from .exceptions import WindowNotFoundException
-from .exceptions import TemplateNotFoundException
+import api
+from cachedorders import CachedCharacterOrders
+from eveexceptions import WindowNotFoundException
+from eveexceptions import TemplateNotFoundException
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
+
+# set format of log entries
+formatter = logging.Formatter('%(asctime)s %(funcName)-20s %(levelname)-8s %(message)s')
+
+# for logging to console
+ch = logging.StreamHandler()
+ch.setFormatter(formatter)
+ch.setLevel(logging.INFO)
+
+# add handlers to logger
+logger.addHandler(ch)
 
 class evebot:
     """A class to handle logging in to the EVE client, and the automated 
     updating and entering of market ordrs"""
 
-    def __init__(self, config_file, database):
+    def __init__(self, config_file=None, database=None):
 
         # read in API keys
         with open(config_file) as infile:
             self.config = yaml.load(infile.read())
 
         # instantiate local order, transaction, inventory caches
-        self.cached_orders = CachedCharacterOrders(self.config['credentials'])
-        self.cached_txns = CachedCharacterTxns(self.config['credentials'])
-        self.cached_inventory = CachedCharacterInventory(self.config['credentials'])
+        self.cached_orders = CachedCharacterOrders()
+        self.cached_txns = None #CachedCharacterTxns(self.config['credentials'])
+        self.cached_inventory = None #CachedCharacterInventory(self.config['credentials'])
 
         # instantiate the class which interacts with the client
         self.client = ClientManager(self.config)
 
         # instantiate the market-interacting component classes
         self.updater = OrderUpdater(self.client, self.config, self.cached_orders)
-        self.seller = ItemSeller(self.client, self.config)
-        self.buyer = ItemBuyer(self.client, self.config)
+        self.seller = ItemSeller(self.client)#, self.config)
+        self.buyer = ItemBuyer(self.client)#, self.config)
 
 
     def main(self):
@@ -56,10 +73,9 @@ class ClientManager:
 
     def __init__(self, config):
         self.config = config
-        self.logger = logging.getLogger(__name__)
 
     
-    def wait_for_window(window_name, window_img_path, timeout=10):
+    def wait_for_window(self, window_name, window_img_path, timeout=10):
         """Wait for the window identified by window_img to load
     
         Args:
@@ -71,7 +87,7 @@ class ClientManager:
             WindowNotFoundException: if the specified window isn't detected after the timeout period
         """
     
-        self.logger.debug('Waiting for %s to load', window_name)
+        logger.debug('Waiting for %s to load', window_name)
     
         t_start = dt.datetime.now()
         t_wait = dt.timedelta(seconds=timeout)
@@ -81,14 +97,14 @@ class ClientManager:
     
             try:
                 self.find_template(window_img_path)
-                self.logger.debug('%s window ready', window_name)
+                logger.debug('%s window ready', window_name)
                 return True
 
             except TemplateNotFoundException:
                 time.sleep(5)
     
         # should only get here if we timed out
-        self.logger.debug('Could not find %s window', window_name)
+        logger.debug('Could not find %s window', window_name)
     
         raise WindowNotFoundException()
 
@@ -103,28 +119,28 @@ class ClientManager:
 
         try:
             # start the launcher
-            os.startfile(config['launcher_path'])
-            wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
-            self.logger.debug('started launcher')
+            os.startfile(self.config['launcher_path'])
+            self.wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
+            logger.debug('started launcher')
     
             # start the EVE client
             self.click_template('images/launcher-login-small.png')
-            wait_for_window('Character selection', 'images/client-theoname.png', 60)
-            self.logger.debug('started client')
+            self.wait_for_window('Character selection', 'images/client-theoname.png', 60)
+            logger.debug('started client')
         
             # log in trading character
             self.click_template('images/client-theoface-small.png')
-            wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
-            self.logger.debug('logged in character')
+            self.wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
+            logger.debug('logged in character')
         
             # kill the launcher (it uses lots of CPU for some reason)
             os.system("taskkill /im evelauncher.exe")
-            self.logger.debug('killed launcher')
+            logger.debug('killed launcher')
 
             return True
 
-        except WindowNoteFoundException:
-            self.logger.error('Failed to log in')
+        except WindowNotFoundException:
+            logger.error('Failed to log in')
 
             return False
     
@@ -137,7 +153,7 @@ class ClientManager:
 
         # kill the EVE client process
         os.system("taskkill /im exefile.exe")
-        self.logger.debug('killed EVE client')
+        logger.debug('killed EVE client')
 
 
     def move_to(self, position, jitter=(0,0), relative=False):
@@ -171,11 +187,11 @@ class ClientManager:
             pg.moveTo(*to_pos, duration=move_time)
 
     
-    def find_template(self, template, threshold=0.9, how=cv2.TM_CCOEFF_NORMED):
+    def find_template(self, template_path, threshold=0.9, how=cv2.TM_CCOEFF_NORMED):
         """Find the location of the provided template image on the screen.
 
         Args:
-            template(str): path to image file
+            template_path(str): path to image file
             threshold(float): match threshold to consider template 'found'
             how: cv2 argument to determine how to do the matching
 
@@ -197,23 +213,23 @@ class ClientManager:
         matches = np.array(np.where(result_arr >= threshold))
 
         if matches.size == 0:
-            self.logger.error('Could not find template %s', template_path)
+            logger.error('Could not find template %s', template_path)
             raise TemplateNotFoundException
     
         (_, maxMatch, _, maxLoc) = cv2.minMaxLoc(result_arr)
-        self.logger.debug('Found template %s at %s with confidence %s', template_path, maxLoc, maxMatch)
+        logger.debug('Found template %s at %s with confidence %s', template_path, maxLoc, maxMatch)
     
         return np.array(maxLoc)
 
 
-    def click_template(self, template, button='left'):
+    def click_template(self, template_path, button='left'):
         """Click on the region of the screen that matches the provided template"""
 
         # find the top left corner of the image
-        img_pos = find_template(template)
+        img_pos = self.find_template(template_path)
     
         # find the center of the image as top left corner + w/2, + h/2
-        img = cv2.imread(img_path)
+        img = cv2.imread(template_path)
         offset_x = img.shape[1] / 2
         offset_y = img.shape[0] / 2
         img_center = [coord + offset for coord, offset in zip(img_pos, [offset_x, offset_y])]
@@ -258,7 +274,7 @@ class ClientManager:
         pg.press(hotkey_dict[window_name])
         pg.keyUp('alt')
 
-        self.logger.debug("Opened client window '%s'", window_name)
+        logger.debug("Opened client window '%s'", window_name)
 
 
     def open_context_menu(self, position, jitter=(0,0)):
@@ -326,7 +342,7 @@ class ClientManager:
         #price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
         #price_float = float(price_text) / 100
     
-        self.logger.debug('Extracted item name : (%s)', name_text)
+        logger.debug('Extracted item name : (%s)', name_text)
     
         return name_text
 
@@ -357,14 +373,14 @@ class OrderUpdater:
         try:
             name_text = self.client.ocr_row(position)
         except ValueError:
-            self.logger.error('Failed to ocr row for %s order at %s', order_type, position)
+            logger.error('Failed to ocr row for %s order at %s', order_type, position)
             return False
     
         # match ocr'd info to api info
         try:
             this_order = self.cached_orders.match_ocr_text(name_text, order_type)
         except NoOCRMatchException:
-            self.logger.error('Failed to match OCR order info %s ', name_text)
+            logger.error('Failed to match OCR order info %s ', name_text)
             return False
     
         if interactive:
@@ -528,6 +544,15 @@ class ItemSeller:
         pass
 
 
+class ItemBuyer:
+
+	def __init__(self, client):
+		pass
+
+def flip_color(cv2_arr):
+    """Exchange the R and B values in a cv2 RGB tuple"""
+    return cv2_arr[:, :, ::-1]
+
 def lookup_region_id(station_id):
     """Look up the region_id of the region containing the station identified by station_id
     
@@ -544,3 +569,9 @@ def lookup_region_id(station_id):
                    }
 
     return lookup_dict[station_id]
+
+
+if __name__ == '__main__':
+
+	bot = evebot(config_file="config.yaml")
+	bot.main()
