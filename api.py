@@ -3,6 +3,7 @@ import requests as rq
 
 import pandas as pd
 
+INV_TYPES = pd.read_csv('static/invTypes.csv')
 logger = logging.getLogger(__name__)
 
 def get_market_orders(region_id='10000030', type_id='34'):
@@ -40,3 +41,9 @@ def get_market_orders(region_id='10000030', type_id='34'):
 
     # TODO add logging of snapshot to database
     return orders.convert_objects(convert_numeric=True).sort_values('price')
+
+
+def typeID_to_name(type_id):
+    """Look up item type name by typeID"""
+    return INV_TYPES.loc[INV_TYPES.typeID == int(type_id)].typeName.values[0]
+

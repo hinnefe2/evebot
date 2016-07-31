@@ -4,17 +4,19 @@ import requests as rq
 from xml.etree import ElementTree
 
 import Levenshtein as lev
+import numpy as np
 import pandas as pd
 
 from eveexceptions import NoOCRMatchException
 
 INV_TYPES = pd.read_csv('static/invTypes.csv')
+logger = logging.getLogger(__name__)
+
 
 class CachedCharacterOrders():
     """Class to store the result of a cached API call"""
 
     def __init__(self, credentials=None):
-        self.logger = logging.getLogger(__name__)
         self.key_id = '442571'
         self.access_code = '7qdTnpfrBfL3Gw2elwKaT9SsGkn6O5gwV3QUM77S3pHPanRBzzDyql5pCUU7V0bS'
         self.api_url = 'https://api.eveonline.com/char/MarketOrders.xml.aspx?keyID={}&vCode={}'
@@ -27,7 +29,7 @@ class CachedCharacterOrders():
 
     def pull(self):
         """Pull the data from the API"""
-        self.logger.debug('Querying character orders from XML API')
+        logger.debug('Querying character orders from XML API')
         resp = rq.get(self.api_url.format(self.key_id, self.access_code))
 
         # ugly, but can't get lxml to work with bs4
@@ -45,13 +47,13 @@ class CachedCharacterOrders():
         names = INV_TYPES[['typeID', 'typeName']]
         char_orders = char_orders.merge(names, on='typeID', how='left')
 
-        self.logger.debug('Got character orders from XML API')
+        logger.debug('Got character orders from XML API')
 
         # in UTC, but w/out tzinfo in the datetime object
         self.api_cached_until = pd.to_datetime(tree.getchildren()[2].text)
         self.data = char_orders
 
-        self.logger.debug('API character orders cached until %s UTC', self.api_cached_until)
+        logger.debug('API character orders cached until %s UTC', self.api_cached_until)
 
     def update(self, old_row, new_price):
         """Update the locally stored information to reflect
@@ -66,9 +68,9 @@ class CachedCharacterOrders():
 
         self.data.loc[self.data.orderID == order_id, 'price'] = new_price
 
-    def get(self):
-        """Return the character order dataframe"""
-        return self.data
+    def get_current(self):
+        """Return the currently active character orders"""
+        return self.data.loc[self.data.orderState == 0]
 
     def match_ocr_text(self, ocr_text, order_type):
         """Try to match the OCR'd order text to known orders from the API / cache"""
@@ -78,13 +80,13 @@ class CachedCharacterOrders():
         diff_threshold = 3
 
         # load the orders from the local cache
-        char_orders = self.get()
+        active_char_orders = self.get_current()
     
         # only search in buys or sells to prevent accidentally matching on wrong order type
         if order_type == 'buy':
-            buys_or_sells = char_orders.loc[char_orders.bid == 1]
+            buys_or_sells = active_char_orders.loc[active_char_orders.bid == 1]
         elif order_type == 'sell':
-            buys_or_sells = char_orders.loc[char_orders.bid == 0]
+            buys_or_sells = active_char_orders.loc[active_char_orders.bid == 0]
         else:
             raise Exception('invalid order type: {}'.format(order_type))
     
@@ -95,7 +97,7 @@ class CachedCharacterOrders():
     
         best_match_index = np.argmin(lev_distance)
         best_match_diff = np.min(lev_distance)
-        best_match = char_orders.iloc[best_match_index]
+        best_match = active_char_orders.iloc[best_match_index]
     
         # raise an exception if the ocr strings don't match anything
         pct_diff = best_match_diff / len(to_match)
@@ -107,4 +109,4 @@ class CachedCharacterOrders():
     
         logger.debug('Matched (%s) to (%s)', ocr_text, best_match.typeName)
     
-        return char_orders.iloc[best_match_index]
+        return active_char_orders.iloc[best_match_index]

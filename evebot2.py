@@ -10,6 +10,7 @@ import yaml
 import cv2
 import numpy as np
 import pyautogui as pg
+import pyperclip as pc
 import pytesseract as pt
 import PIL
 import Levenshtein as lev
@@ -24,6 +25,11 @@ logging.basicConfig(format='%(asctime)s %(funcName)-20s %(levelname)-8s %(messag
 		    stream=sys.stdout,
 		    level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+pg.PAUSE = 1
+
+#TODO: refactor this into the config file
+MAX_DELTA_ISK = 30000000
 
 class evebot:
     """A class to handle logging in to the EVE client, and the automated 
@@ -114,12 +120,12 @@ class ClientManager:
         try:
             # start the launcher
             os.startfile(self.config['launcher_path'])
-            self.wait_for_window('EVE launcher', 'images/launcher-header.png', 60)
+            self.wait_for_window('EVE launcher', 'images/launcher-login-small.png', 60)
             logger.debug('started launcher')
     
             # start the EVE client
             self.click_template('images/launcher-login-small.png')
-            self.wait_for_window('Character selection', 'images/client-theoname.png', 60)
+            self.wait_for_window('Character selection', 'images/client-theoface-small.png', 60)
             logger.debug('started client')
         
             # log in trading character
@@ -340,6 +346,17 @@ class ClientManager:
     
         return name_text
 
+    def open_orders_screen(self):
+        """Open the orders screen so that orders can be updated"""
+
+	# open up the market window
+        self.open_window('market')
+        self.wait_for_window('In-game market window', 'images/client-market-header2.png', 20)
+    	
+	# open up the 'My Orders' tab of the market window
+	self.click_template('images/client-market-myorders-dim.png')
+        self.wait_for_window('Character orders tab', 'images/client-market-selling.png', 20)
+
 
 class OrderUpdater:
     """A class to automate the updating of existing market orders"""
@@ -349,12 +366,7 @@ class OrderUpdater:
         self.config = config
         self.cached_orders = cached_orders
 
-    def open_orders_screen(self):
-        """Open the orders screen so that orders can be updated"""
-
-        self.client.open_window('market')
-        self.client.wait_for_window('In-game market window', 'images/client-market-header2.png', 20)
-
+    
     def modify_order(self, position, order_type):
         """Update the order at the specified position
         
@@ -373,12 +385,10 @@ class OrderUpdater:
         # match ocr'd info to api info
         try:
             this_order = self.cached_orders.match_ocr_text(name_text, order_type)
+	    print("this_order: ", this_order)
         except NoOCRMatchException:
             logger.error('Failed to match OCR order info %s ', name_text)
             return False
-    
-        if interactive:
-            pg.alert('checking on {}'.format(this_order.typeName))
     
         # calculate an appropriate new price
         new_price = self.choose_price(this_order)
@@ -393,18 +403,15 @@ class OrderUpdater:
     
             # open the context menu, click on modify order, paste price
             self.client.open_context_menu(this_order_pos, jitter)
-            self.client.click_template('Modify order', 'images/client-context-modifyorder.png')
+            self.client.click_template('images/client-context-modifyorder.png')
             time.sleep(1)
             self.client.enter_text(new_price)
-    
-            if interactive:
-                pg.confirm('Confirm?')
     
             self.client.wait_for_window('Order confirmation', 'images/client-popup-ok.png')
             self.client.click_template('images/client-popup-ok.png')
             time.sleep(2)
     
-            self.cached_orders.update_row(this_order, new_price)
+            self.cached_orders.update(this_order, new_price)
 
             # if order is > x% off from market average
             # TODO: put wait time in config file
@@ -430,18 +437,26 @@ class OrderUpdater:
         old_price = this_order.price
         type_name = this_order.typeName
         region_id = lookup_region_id(this_order.stationID)
-        order_type = this_order.bid.map({1:'buy', 2:'sell'})
+        order_type = {1:'buy', 0:'sell'}[this_order.bid]
 
         # minimum sell-buy margin to update on
         margin_threshold = 0.08
         
-        # get market orders
+        # get market orders11
         # TODO implement caching
         market_orders = api.get_market_orders(region_id = region_id,
                                               type_id = this_order.typeID)
+
         # separate buy and sell orders
         buy_orders = market_orders.loc[market_orders.buy == True]
-        sell_orders = market_orders.loc[(market_orders.buy == False) & (market_orders.stationID == char_order.stationID)]
+
+	#TODO !!!!!!!!!! FIX THIS
+	print(market_orders[['price', 'stationID']])
+	print(this_order[['price','stationID']])
+        sell_orders = market_orders.loc[(market_orders.buy == False) & (market_orders.stationID == this_order.stationID)]
+
+        assert len(buy_orders) > 0, "No buy orders extracted from API for price comparison"
+        assert len(sell_orders) > 0, "No sell orders extracted from API for price comparison"
 
         # CHECK - ours is already the best price
         if order_type == 'buy':
@@ -453,7 +468,7 @@ class OrderUpdater:
             return old_price
 
         # CHECK - ISK delta < threshold
-        delta_isk = (best_price - old_price) * char_order.volRemaining
+        delta_isk = (best_price - old_price) * this_order.volRemaining
         if abs(delta_isk) > MAX_DELTA_ISK:
             logger.info('%s - HOLD - DELTA : %s delta of %.2f is too high', order_type.upper(), type_name, delta_isk)
             return old_price
@@ -483,7 +498,8 @@ class OrderUpdater:
     def main(self):
         """Update all orders"""
 
-	self.open_orders_screen()
+	self.client.close_all_windows()
+	self.client.open_orders_screen()
 
         # find location of first SELL order
         selling_pos = self.client.find_template('images/client-market-selling.png')
@@ -568,8 +584,8 @@ def lookup_region_id(station_id):
     """
 
     lookup_dict = {'station_id': 'region_id',
-                   '60004588': '10000042',  # Rens
-                   '60008494': '10000043'   # Amarr
+                   60004588: 10000042,  # Rens
+                   60008494: 10000043   # Amarr
                    }
 
     return lookup_dict[station_id]
