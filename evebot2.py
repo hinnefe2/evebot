@@ -3,6 +3,7 @@
 import datetime as dt
 import logging
 import os
+import sys
 import time
 import yaml
 
@@ -10,26 +11,19 @@ import cv2
 import numpy as np
 import pyautogui as pg
 import pytesseract as pt
+import PIL
+import Levenshtein as lev
 
 import api
 from cachedorders import CachedCharacterOrders
 from eveexceptions import WindowNotFoundException
 from eveexceptions import TemplateNotFoundException
+from eveexceptions import NoOCRMatchException
 
+logging.basicConfig(format='%(asctime)s %(funcName)-20s %(levelname)-8s %(message)s',
+		    stream=sys.stdout,
+		    level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-logger.propagate = False
-
-# set format of log entries
-formatter = logging.Formatter('%(asctime)s %(funcName)-20s %(levelname)-8s %(message)s')
-
-# for logging to console
-ch = logging.StreamHandler()
-ch.setFormatter(formatter)
-ch.setLevel(logging.INFO)
-
-# add handlers to logger
-logger.addHandler(ch)
 
 class evebot:
     """A class to handle logging in to the EVE client, and the automated 
@@ -322,7 +316,7 @@ class ClientManager:
         price_w = 100
     
         name_top_left = position
-        name_bottom_right = (row_top_left[0] + name_w, row_top_left[1] + row_y_offset)
+        name_bottom_right = (position[0] + name_w, position[1] + row_y_offset)
     
         # take a screenshot of the 'name' column in the given row, then blow it up 5x
         name_snap = pg.screenshot(region=wh_from_pos(name_top_left, name_bottom_right))
@@ -359,7 +353,7 @@ class OrderUpdater:
         """Open the orders screen so that orders can be updated"""
 
         self.client.open_window('market')
-        self.client.wait_for_window('In-game market window', 'images/client-market-header2.png')
+        self.client.wait_for_window('In-game market window', 'images/client-market-header2.png', 20)
 
     def modify_order(self, position, order_type):
         """Update the order at the specified position
@@ -489,6 +483,8 @@ class OrderUpdater:
     def main(self):
         """Update all orders"""
 
+	self.open_orders_screen()
+
         # find location of first SELL order
         selling_pos = self.client.find_template('images/client-market-selling.png')
     
@@ -496,7 +492,7 @@ class OrderUpdater:
         selling_to_order_offset = np.array([80, 19])
         order_pos = selling_pos + selling_to_order_offset
     
-        char_orders = cached_orders.data
+        char_orders = self.cached_orders.data
         n_selling = len(char_orders.loc[(char_orders.bid == 0) & (char_orders.orderState == 0)])
         logger.debug('Checking %d SELL orders', n_selling)
     
@@ -552,6 +548,14 @@ class ItemBuyer:
 def flip_color(cv2_arr):
     """Exchange the R and B values in a cv2 RGB tuple"""
     return cv2_arr[:, :, ::-1]
+
+def wh_from_pos(pos1, pos2):
+    """Calculate width and height from top-left, bottom-right positions"""
+    left = pos1[0]
+    top = pos1[1]
+    w = pos2[0] - pos1[0]
+    h = pos2[1] - pos1[1]
+    return (left, top, w, h)
 
 def lookup_region_id(station_id):
     """Look up the region_id of the region containing the station identified by station_id

@@ -3,6 +3,7 @@ import logging
 import requests as rq
 from xml.etree import ElementTree
 
+import Levenshtein as lev
 import pandas as pd
 
 from eveexceptions import NoOCRMatchException
@@ -82,7 +83,7 @@ class CachedCharacterOrders():
         # only search in buys or sells to prevent accidentally matching on wrong order type
         if order_type == 'buy':
             buys_or_sells = char_orders.loc[char_orders.bid == 1]
-        elif order_type == 'else':
+        elif order_type == 'sell':
             buys_or_sells = char_orders.loc[char_orders.bid == 0]
         else:
             raise Exception('invalid order type: {}'.format(order_type))
