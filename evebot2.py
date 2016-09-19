@@ -23,7 +23,7 @@ from eveexceptions import NoOCRMatchException
 
 logging.basicConfig(format='%(asctime)s %(funcName)-20s %(levelname)-8s %(message)s',
 		    stream=sys.stdout,
-		    level=logging.DEBUG)
+		    level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 pg.PAUSE = 1
@@ -42,7 +42,7 @@ class evebot:
             self.config = yaml.load(infile.read())
 
         # instantiate local order, transaction, inventory caches
-        self.cached_orders = CachedCharacterOrders()
+        self.cached_orders = CachedCharacterOrders(self.config['credentials'])
         self.cached_txns = None #CachedCharacterTxns(self.config['credentials'])
         self.cached_inventory = None #CachedCharacterInventory(self.config['credentials'])
 
@@ -61,11 +61,12 @@ class evebot:
         for i in range(self.config['n_main_loops']):
             if self.client.login():
                 self.updater.main()
-                self.seller.main()
-                self.buyer.main()
-                self.client.logout()
+                #self.seller.main()
+                #self.buyer.main()
+                #self.client.logout()
+		self.client.logout()
 
-            time.sleep(self.config['t_sleep_main'])
+            time.sleep(self.config['t_sleep_main'] + np.random.randint(0,150))
 
 
 class ClientManager:
@@ -125,11 +126,11 @@ class ClientManager:
     
             # start the EVE client
             self.click_template('images/launcher-login-small.png')
-            self.wait_for_window('Character selection', 'images/client-theoface-small.png', 60)
+            self.wait_for_window('Character selection', self.config['images']['char_face'], 60)
             logger.debug('started client')
         
             # log in trading character
-            self.click_template('images/client-theoface-small.png')
+            self.click_template(self.config['images']['char_face'])
             self.wait_for_window('In-game GUI', 'images/client-ingame-gui.png', 60)
             logger.debug('logged in character')
         
@@ -263,7 +264,7 @@ class ClientManager:
                        'wallet': 'w',
                        'assets': 'c'}
     
-        img_dict = {'market': 'images/client-market-header2.png',
+        img_dict = {'market': 'images/client-market-header3.png',
                     'assets': 'images/client-assets/header.png'}
     
         # figure out which key and template file are relevant
@@ -351,7 +352,7 @@ class ClientManager:
 
 	# open up the market window
         self.open_window('market')
-        self.wait_for_window('In-game market window', 'images/client-market-header2.png', 20)
+        self.wait_for_window('In-game market window', 'images/client-market-header3.png', 20)
     	
 	# open up the 'My Orders' tab of the market window
 	self.click_template('images/client-market-myorders-dim.png')
@@ -385,7 +386,6 @@ class OrderUpdater:
         # match ocr'd info to api info
         try:
             this_order = self.cached_orders.match_ocr_text(name_text, order_type)
-	    print("this_order: ", this_order)
         except NoOCRMatchException:
             logger.error('Failed to match OCR order info %s ', name_text)
             return False
@@ -450,9 +450,6 @@ class OrderUpdater:
         # separate buy and sell orders
         buy_orders = market_orders.loc[market_orders.buy == True]
 
-	#TODO !!!!!!!!!! FIX THIS
-	print(market_orders[['price', 'stationID']])
-	print(this_order[['price','stationID']])
         sell_orders = market_orders.loc[(market_orders.buy == False) & (market_orders.stationID == this_order.stationID)]
 
         assert len(buy_orders) > 0, "No buy orders extracted from API for price comparison"
@@ -530,7 +527,7 @@ class OrderUpdater:
         for i in range(n_buying):
             this_order_pos = np.array([order_pos[0], order_pos[1] + 20 * i])
     
-            self.modify_order(this_order_pos, 'buy', interactive)
+            self.modify_order(this_order_pos, 'buy')
     
     
 class ItemSeller:
@@ -584,14 +581,13 @@ def lookup_region_id(station_id):
     """
 
     lookup_dict = {'station_id': 'region_id',
-                   60004588: 10000042,  # Rens
+                   60004588: 10000030,  # Rens
                    60008494: 10000043   # Amarr
                    }
 
     return lookup_dict[station_id]
 
-
 if __name__ == '__main__':
 
-	bot = evebot(config_file="config.yaml")
+	bot = evebot(config_file="config-theo.yaml")
 	bot.main()

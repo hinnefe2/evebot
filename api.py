@@ -6,6 +6,10 @@ import pandas as pd
 INV_TYPES = pd.read_csv('static/invTypes.csv')
 logger = logging.getLogger(__name__)
 
+# turn off logging from these two libraries
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 def get_market_orders(region_id='10000030', type_id='34'):
     """Get the current market orders for an item in a region.
     API has 6 min cache time.

@@ -388,6 +388,10 @@ def ocr_row(row_top_left):
     price_text = str(re.search('^([0-9]*).*', price_text).groups(1)[0])
     price_float = float(price_text) / 100
 
+    # ugly hack, tesseract always reads 'Machariel' as 'MachaHel'
+    if name_text == 'MachaHel':
+	    name_text = 'Machariel'
+
     logger.debug('Extracted (typename, price) : (%s, %.2f)', name_text, price_float)
 
     return (name_text, price_text)
@@ -668,7 +672,7 @@ def get_market_orders(region_id='10000030', type_id='34'):
     return orders.convert_objects(convert_numeric=True).sort_values('price')
 
 
-def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_threshold=0.2, diff_threshold=3):
+def match_ocr_order(name_text, price_text, order_type, char_orders=None, pct_threshold=0.20, diff_threshold=3):
     """Match the name and price scraped from the screen to info gathered from the API"""
 
     if char_orders is None:

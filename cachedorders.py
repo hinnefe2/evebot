@@ -17,8 +17,8 @@ class CachedCharacterOrders():
     """Class to store the result of a cached API call"""
 
     def __init__(self, credentials=None):
-        self.key_id = '442571'
-        self.access_code = '7qdTnpfrBfL3Gw2elwKaT9SsGkn6O5gwV3QUM77S3pHPanRBzzDyql5pCUU7V0bS'
+        self.key_id = credentials['key_id']
+        self.access_code = credentials['access_code']
         self.api_url = 'https://api.eveonline.com/char/MarketOrders.xml.aspx?keyID={}&vCode={}'
 
         self.api_cached_until = dt.datetime(2000, 1, 1)
@@ -31,6 +31,8 @@ class CachedCharacterOrders():
         """Pull the data from the API"""
         logger.debug('Querying character orders from XML API')
         resp = rq.get(self.api_url.format(self.key_id, self.access_code))
+
+	print( self.api_url.format(self.key_id, self.access_code))
 
         # ugly, but can't get lxml to work with bs4
         tree = ElementTree.fromstring(resp.content)
@@ -97,10 +99,10 @@ class CachedCharacterOrders():
     
         best_match_index = np.argmin(lev_distance)
         best_match_diff = np.min(lev_distance)
-        best_match = active_char_orders.iloc[best_match_index]
-    
+        best_match = buys_or_sells.ix[best_match_index]
+
         # raise an exception if the ocr strings don't match anything
-        pct_diff = best_match_diff / len(to_match)
+        pct_diff = float(best_match_diff) / float(len(to_match))
     
         if (pct_diff > pct_threshold) and (best_match_diff > diff_threshold):
             logger.error('trying to match (%s) Best match (%s). Distance pct %.2f}',
@@ -108,5 +110,5 @@ class CachedCharacterOrders():
             raise NoOCRMatchException
     
         logger.debug('Matched (%s) to (%s)', ocr_text, best_match.typeName)
-    
-        return active_char_orders.iloc[best_match_index]
+
+        return best_match
